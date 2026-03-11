@@ -54,11 +54,19 @@ def run_pipeline(
     print(f"共 {len(items)} 张待打标")
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
+    # 图片保存目录：与标签同目录下 images 子文件夹，便于人工验证时看图对标签
+    images_dir = out_path / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
     key = api_key or QWEN_API_KEY
 
     for i, (name, image_bytes) in enumerate(items, 1):
+        # 先保存图片到 images 文件夹，命名与标签中的 name 一致
+        image_file = images_dir / name
+        with open(image_file, "wb") as f:
+            f.write(image_bytes)
+
         print(f"  [{i}/{len(items)}] {name} ... ", end="", flush=True)
         try:
             label_text = label_image_with_qwen(
@@ -86,6 +94,7 @@ def run_pipeline(
         for r in results:
             f.write(f"=== {r['name']} ===\n{r.get('label', r.get('error', ''))}\n\n")
     print(f"文本摘要: {txt_file}")
+    print(f"图片已保存到: {images_dir}（命名与标签中的 name 一致，便于人工验证）")
     return results
 
 

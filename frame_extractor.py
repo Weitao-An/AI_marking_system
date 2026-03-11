@@ -84,9 +84,9 @@ def collect_media(
 ) -> List[Tuple[str, bytes]]:
     """
     根据路径类型收集所有要打标的图片字节。
-    - 若是视频：按滑窗提取帧，返回 [(f"frame_{idx}", bytes), ...]
-    - 若是单张图：返回 [(filename, bytes)]
-    - 若是目录：遍历目录下图片文件，返回 [(filename, bytes), ...]
+    - 若是视频：按滑窗提取帧，返回 [(f"{视频名}_{帧数:06d}.jpg", bytes), ...]，便于与标签对应人工验证
+    - 若是单张图：返回 [(原文件名, bytes)]
+    - 若是目录：遍历目录下图片文件，返回 [(原文件名, bytes), ...]
 
     :return: [(名称, 图片字节), ...]
     """
@@ -100,13 +100,15 @@ def collect_media(
     if input_path.is_file():
         suf = input_path.suffix.lower()
         if suf in (".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"):
+            # 命名：视频名_帧数.jpg，便于人工验证时对应
+            video_stem = input_path.stem
             for idx, jpeg_bytes in extract_frames_from_video(
                 input_path,
                 step=video_step,
                 window_size=video_window_size,
                 max_frames=max_video_frames,
             ):
-                results.append((f"frame_{idx:06d}.jpg", jpeg_bytes))
+                results.append((f"{video_stem}_{idx:06d}.jpg", jpeg_bytes))
         elif suf in suffix_image:
             results.append((input_path.name, load_image_as_bytes(input_path)))
         else:
