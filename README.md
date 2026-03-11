@@ -1,6 +1,6 @@
-# 视觉模型标注流程 - 第一步：本地素材 → Gemini 自动打标
+# 视觉模型标注流程 - 第一步：本地素材 → Qwen 自动打标
 
-本步骤实现：**从本地读取视频（滑窗提取帧）或图片，并上传到 Gemini 进行自动打标**。
+本步骤实现：**从本地读取视频（滑窗提取帧）或图片，并上传到 Qwen（通义千问）进行自动打标**。使用阿里云百炼 DashScope 的视觉 API。
 
 ## 环境准备
 
@@ -11,8 +11,9 @@ pip install -r requirements.txt
 
 ## 配置 API Key
 
-- 已在项目根目录创建 `.env`，并已填入你提供的 Gemini API Key。
-- 若需更换，可编辑 `.env` 中的 `GEMINI_API_KEY`，或复制 `.env.example` 为 `.env` 后填写。
+- 在 `.env` 中配置 **QWEN_API_KEY**（即 DashScope API Key）。
+- 获取地址： [阿里云百炼 API-KEY 管理](https://dashscope.console.aliyun.com/api_key_management)  
+- 也可使用环境变量 `DASHSCOPE_API_KEY`，程序会优先读取 `QWEN_API_KEY`。
 
 **注意**：`.env` 已加入 `.gitignore`，请勿将 API Key 提交到版本库。
 
@@ -59,12 +60,12 @@ python main.py "路径/到/图片目录" -o output_labels
 | `--video-step` | 视频滑窗步长（每隔多少帧取一帧） | 30 |
 | `--video-window` | 滑窗大小 | 1 |
 | `--max-frames` | 视频最多提取帧数，0 为不限制 | 0 |
-| `--model` | Gemini 模型名 | gemini-2.0-flash |
+| `--model` | Qwen 视觉模型名（默认最新 VL） | qwen3-vl-plus |
 | `--api-key` | 覆盖 .env 中的 API Key | 使用 .env |
 
 ## 输出说明
 
-- `output_labels/labels_<时间戳>.json`：每张图/每帧的名称与 Gemini 返回的标注文本。
+- `output_labels/labels_<时间戳>.json`：每张图/每帧的名称与 Qwen 返回的标注文本。
 - `output_labels/labels_<时间戳>.txt`：同一内容的纯文本摘要，便于阅读。
 
 打标内容包含：场景描述、主要物体、标签列表、建议用途（与流程图中的「视觉模型标注」对应，便于后续算法抠像或数据增强）。
@@ -73,12 +74,12 @@ python main.py "路径/到/图片目录" -o output_labels
 
 ```
 AI标注模型/
-├── .env                 # API Key（勿提交）
+├── .env                 # QWEN_API_KEY（勿提交）
 ├── .env.example
 ├── .gitignore
 ├── config.py            # 配置与 API Key 加载
 ├── frame_extractor.py   # 视频滑窗抽帧、图片读取
-├── gemini_labeler.py    # 调用 Gemini 打标
+├── qwen_labeler.py      # 调用 Qwen 通义千问打标
 ├── main.py              # 主流程入口
 ├── requirements.txt
 └── README.md

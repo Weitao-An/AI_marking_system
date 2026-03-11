@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-主流程：从本地读取视频（滑窗提取帧）或图片，上传到 Gemini 实现自动打标。
+主流程：从本地读取视频（滑窗提取帧）或图片，上传到 Qwen 通义千问实现自动打标。
 """
 import argparse
 import json
 from pathlib import Path
 from datetime import datetime
 
-from config import GEMINI_API_KEY, DEFAULT_WINDOW_STEP, DEFAULT_WINDOW_SIZE
+from config import QWEN_API_KEY, DEFAULT_WINDOW_STEP, DEFAULT_WINDOW_SIZE
 from frame_extractor import collect_media
-from gemini_labeler import label_image_with_gemini, DEFAULT_ANNOTATION_PROMPT
+from qwen_labeler import label_image_with_qwen, DEFAULT_ANNOTATION_PROMPT
 
 
 def run_pipeline(
@@ -18,14 +18,14 @@ def run_pipeline(
     video_step: int = DEFAULT_WINDOW_STEP,
     video_window_size: int = DEFAULT_WINDOW_SIZE,
     max_video_frames: int = 0,
-    model: str = "gemini-2.0-flash",
+    model: str = "qwen3-vl-plus",
     api_key: str = "",
 ):
     """
-    完整流程：收集媒体 -> 逐张调用 Gemini 打标 -> 保存结果。
+    完整流程：收集媒体 -> 逐张调用 Qwen 打标 -> 保存结果。
     """
-    if not GEMINI_API_KEY and not api_key:
-        raise ValueError("请设置 GEMINI_API_KEY（在 .env 中）或通过参数传入 api_key")
+    if not QWEN_API_KEY and not api_key:
+        raise ValueError("请设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY（在 .env 中）或通过参数传入 api_key")
 
     path = Path(input_path)
     if not path.exists():
@@ -56,12 +56,12 @@ def run_pipeline(
     out_path.mkdir(parents=True, exist_ok=True)
 
     results = []
-    key = api_key or GEMINI_API_KEY
+    key = api_key or QWEN_API_KEY
 
     for i, (name, image_bytes) in enumerate(items, 1):
         print(f"  [{i}/{len(items)}] {name} ... ", end="", flush=True)
         try:
-            label_text = label_image_with_gemini(
+            label_text = label_image_with_qwen(
                 image_bytes=image_bytes,
                 prompt=DEFAULT_ANNOTATION_PROMPT,
                 model=model,
@@ -91,7 +91,7 @@ def run_pipeline(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="从本地视频/图片读取并上传 Gemini 自动打标（流程第一步）"
+        description="从本地视频/图片读取并上传 Qwen 通义千问自动打标（流程第一步）"
     )
     parser.add_argument(
         "input",
@@ -125,14 +125,14 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="gemini-2.0-flash",
-        help="Gemini 模型名（默认: gemini-2.0-flash）",
+        default="qwen3-vl-plus",
+        help="Qwen 视觉模型名（默认: qwen3-vl-plus，最新 VL）",
     )
     parser.add_argument(
         "--api-key",
         type=str,
         default="",
-        help="Gemini API Key（不填则使用 .env 中的 GEMINI_API_KEY）",
+        help="Qwen/DashScope API Key（不填则使用 .env 中的 QWEN_API_KEY）",
     )
     args = parser.parse_args()
 

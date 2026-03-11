@@ -5,6 +5,7 @@
 from pathlib import Path
 from typing import Iterator, List, Tuple, Union
 import cv2
+import numpy as np
 
 
 def extract_frames_from_video(
@@ -55,6 +56,7 @@ def extract_frames_from_video(
 def load_image_as_bytes(image_path: Union[str, Path]) -> bytes:
     """
     读取单张图片并返回 JPEG 字节（若是其他格式会先解码再编码为 JPEG）。
+    使用 Python 原生 open 读取，避免 Windows 下 cv2.imread 对中文/Unicode 路径的支持问题。
 
     :param image_path: 图片路径
     :return: 图片的 JPEG 字节
@@ -63,7 +65,10 @@ def load_image_as_bytes(image_path: Union[str, Path]) -> bytes:
     if not image_path.is_file():
         raise FileNotFoundError(f"图片不存在: {image_path}")
 
-    img = cv2.imread(str(image_path))
+    with open(image_path, "rb") as f:
+        raw = f.read()
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise RuntimeError(f"无法解码图片: {image_path}")
 

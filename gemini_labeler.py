@@ -2,11 +2,16 @@
 """
 使用 Gemini API 对单张图片进行自动打标（视觉理解/标注）。
 """
+import time
 from typing import Optional
 from google import genai
 from google.genai import types
 
 from config import GEMINI_API_KEY
+
+# 遇到 429 时最多重试次数与基础等待秒数
+MAX_RETRIES_ON_RATE_LIMIT = 3
+RETRY_BASE_DELAY = 22
 
 
 # 默认打标提示：要求模型输出结构化标注，便于后续算法抠像或数据增强使用
@@ -35,6 +40,7 @@ def label_image_with_gemini(
 ) -> str:
     """
     将一张图片（JPEG 字节）发送给 Gemini，返回模型生成的标注文本。
+    遇到 429 限流时会自动重试。
 
     :param image_bytes: 图片的 JPEG 字节
     :param prompt: 打标提示词，默认要求输出场景描述、物体、标签等
@@ -44,19 +50,31 @@ def label_image_with_gemini(
     """
     client = create_client(api_key=api_key)
     image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-    response = client.models.generate_content(
-        model=model,
-        contents=[prompt, image_part],
-    )
-    if not response.text:
-        return ""
-    return response.text.strip()
+    last_error = None
+    for attempt in range(MAX_RETRIES_ON_RATE_LIMIT + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[prompt, image_part],
+            )
+            if not response.text:
+                return ""
+            return response.text.strip()
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            if "429" in err_str and "RESOURCE_EXHAUSTED" in err_str and attempt < MAX_RETRIES_ON_RATE_LIMIT:
+                delay = RETRY_BASE_DELAY * (attempt + 1)
+                time.sleep(delay)
+                continue
+            raise
+    raise last_error
 
 
 def label_image_from_path(
     image_path: str,
     prompt: str = DEFAULT_ANNOTATION_PROMPT,
-    model: str = "gemini-2.0-flash",
+    model: str = "gemini-2.5-flash",
     api_key: Optional[str] = None,
 ) -> str:
     """
