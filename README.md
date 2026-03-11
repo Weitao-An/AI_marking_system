@@ -75,6 +75,41 @@ python main.py "路径/到/图片目录" -o output_labels
 
 打标内容包含：场景描述、物体列表（含归一化坐标）、类别列表、训练建议，便于识图与目标分类训练及人工核对。
 
+---
+
+## 人工验证标注（Web UI）
+
+对 `output_labels/images` 中的图片与对应 `labels_*.json` 进行人工核对与修改。
+
+### 启动
+
+```bash
+# 默认使用项目下的 output_labels
+python review_app.py
+
+# 指定输出目录
+python review_app.py --output-dir "c:/path/to/output_labels"
+
+# 指定端口
+python review_app.py --port 5050
+```
+
+启动后在浏览器打开 **http://127.0.0.1:5050**。
+
+### 功能
+
+- **左侧**：图片列表，点击切换当前图片。
+- **中间**：大图与当前标签中的物体框（归一化坐标绘制为矩形）。
+- **右侧**：编辑当前标注  
+  - **已人工验证**：勾选表示该条已核对。  
+  - **场景描述 / 类别列表 / 训练建议**：文本编辑。  
+  - **物体列表**：表格编辑类别与 x_min, y_min, x_max, y_max（归一化 0～1）；可增删行。  
+- **保存当前标注**：写回最新的 `labels_*.json`，并同步更新同名的 `.txt` 文件。
+
+修改后保存会直接更新输出目录下的标签文件，便于后续训练或算法抠像使用。
+
+---
+
 ## 项目结构
 
 ```
@@ -84,10 +119,13 @@ AI标注模型/
 ├── .gitignore
 ├── config.py            # 配置与 API Key 加载
 ├── frame_extractor.py   # 视频滑窗抽帧、图片读取
+├── label_parser.py      # 标签文本解析/序列化（场景、物体框、类别等）
 ├── qwen_labeler.py      # 调用 Qwen 通义千问打标
 ├── main.py              # 主流程入口
+├── review_app.py        # 人工验证 Web 服务
+├── review_index.html    # 人工验证前端页面
 ├── requirements.txt
 └── README.md
 ```
 
-下一步可在此基础上增加：算法抠像（如 Grounded-SAM）、人工验证、领域随机化与合成数据、特种蒸馏等环节。
+下一步可在此基础上增加：算法抠像（如 Grounded-SAM）、领域随机化与合成数据、特种蒸馏等环节。

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>标注人工验证</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['DM Sans', 'sans-serif'] },
+          colors: {
+            panel: '#1a1d24',
+            card: '#23262d',
+            accent: '#0d9488',
+            accentHover: '#0f766e',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'DM Sans', sans-serif; }
+    .bbox { stroke: #0d9488; stroke-width: 2; fill: none; }
+    .bbox-label { font-size: 11px; fill: #0d9488; font-weight: 600; }
+    input[type="number"] { -moz-appearance: textfield; }
+    input[type="number"]::-webkit-outer-spin-button,
+    input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    /* 中间区域：盒子固定为 100% 宽高，图片填满盒子并用 object-fit:contain 等比缩小，绝不裁切 */
+    #imageArea { min-height: 0; }
+    #imageWrapper { overflow: hidden; }
+    #imageContainer {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      overflow: hidden;
+    }
+    #mainImage {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    #drawOverlay.draw-active { pointer-events: auto; cursor: crosshair; }
+  </style>
+</head>
+<body class="bg-slate-100 h-screen w-screen flex overflow-hidden">
+  <!-- 左侧：图片列表 -->
+  <aside class="w-52 min-w-[140px] max-w-[280px] bg-panel text-white flex flex-col shrink-0 shadow-xl flex-shrink-0">
+    <div class="p-3 border-b border-slate-600 shrink-0">
+      <h1 class="text-base font-semibold text-slate-100">标注验证</h1>
+      <p class="text-xs text-slate-400 mt-1 break-all" id="labelFileInfo">加载中…</p>
+    </div>
+    <div class="flex-1 min-h-0 overflow-y-auto p-2" id="imageList">
+      <!-- 动态填充 -->
+    </div>
+  </aside>
+
+  <!-- 中间：固定尺寸盒子 + 图片填满并 contain，打破高度循环，保证始终等比缩小 -->
+  <main class="flex-1 flex flex-col min-w-0 min-h-0 p-3 overflow-hidden">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 flex-1 min-h-0 relative overflow-hidden" id="imageArea">
+      <div class="absolute inset-0 p-3 box-border" id="imageWrapper">
+        <div class="w-full h-full min-h-0 relative" id="imageContainer">
+          <img id="mainImage" alt="" />
+          <svg id="bboxOverlay" class="absolute top-0 left-0 pointer-events-none"></svg>
+          <div id="drawOverlay" class="absolute inset-0 pointer-events-none z-10 flex items-center justify-center">
+            <span id="drawHint" class="bg-slate-800/90 text-white px-4 py-2 rounded-lg text-sm hidden">在图片上拖拽画出框，松开后填写类别 · Esc 取消</span>
+            <div id="drawPreviewRect" class="absolute border-2 border-dashed border-teal-400 bg-teal-400/10 pointer-events-none hidden"></div>
+          </div>
+        </div>
+      </div>
+      <div class="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-2 z-10">
+        <button type="button" id="prevBtn" class="px-4 py-2 rounded-lg bg-slate-600 text-white text-sm font-medium hover:bg-slate-700 shadow">上一张 ↑</button>
+        <button type="button" id="nextBtn" class="px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accentHover shadow">下一张 ↓</button>
+      </div>
+    </div>
+    <p class="text-sm text-slate-500 mt-1 truncate shrink-0" id="currentName"></p>
+  </main>
+
+  <!-- 右侧：标签编辑 -->
+  <section class="w-[380px] min-w-[320px] max-w-[480px] bg-white border-l border-slate-200 flex flex-col shrink-0 shadow-lg overflow-hidden flex-shrink-0">
+    <div class="p-4 border-b border-slate-200 bg-slate-50 space-y-2">
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" id="verified" class="rounded border-slate-300 text-accent focus:ring-accent" />
+        <span class="text-sm font-medium text-slate-700">已人工验证</span>
+      </label>
+      <button type="button" id="verifyBtn" class="w-full py-2 rounded-lg border-2 border-accent text-accent hover:bg-accent hover:text-white font-medium text-sm transition-colors">
+        人工验证（未勾选时点击即勾选）
+      </button>
+    </div>
+    <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">场景描述</label>
+        <input type="text" id="scene" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-accent/30 focus:border-accent" placeholder="简要描述画面" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">物体列表（类别, x_min, y_min, x_max, y_max 归一化 0～1）</label>
+        <div class="border border-slate-200 rounded-lg overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-slate-100 text-slate-600">
+              <tr>
+                <th class="text-left py-2 px-2">类别</th>
+                <th class="text-left py-2 px-1">x_min</th>
+                <th class="text-left py-2 px-1">y_min</th>
+                <th class="text-left py-2 px-1">x_max</th>
+                <th class="text-left py-2 px-1">y_max</th>
+                <th class="w-8"></th>
+              </tr>
+            </thead>
+            <tbody id="objectsBody"></tbody>
+          </table>
+          <button type="button" id="addObject" class="w-full py-2 text-sm text-accent hover:bg-teal-50 font-medium">+ 添加物体</button>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">类别列表</label>
+        <input type="text" id="categories" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-accent/30 focus:border-accent" placeholder="逗号分隔" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">训练建议</label>
+        <textarea id="suggestion" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-accent/30 focus:border-accent resize-none" placeholder="适合的任务"></textarea>
+      </div>
+    </div>
+    <div class="p-4 border-t border-slate-200 bg-slate-50">
+      <button type="button" id="saveBtn" class="w-full py-2.5 rounded-lg bg-accent hover:bg-accentHover text-white font-medium text-sm transition-colors">保存当前标注</button>
+      <p class="text-xs text-slate-500 mt-2 hidden" id="saveHint">已保存</p>
+    </div>
+  </section>
+
+  <script>
+    const state = {
+      imageNames: [],
+      currentName: null,
+      currentIndex: -1,
+      entry: null,
+      baseUrl: '',
+      pendingEntryName: null,
+      sourceFile: null,
+      drawMode: false,
+      drawStart: null,  // { x, y, contentRect: { ox, oy, dw, dh } }
+    };
+
+    function api(path) {
+      return fetch(state.baseUrl + path).then(r => r.json());
+    }
+
+    function apiPost(path, body) {
+      return fetch(state.baseUrl + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(r => r.json());
+    }
+
+    function renderImageList() {
+      const el = document.getElementById('imageList');
+      el.innerHTML = '';
+      state.imageNames.forEach((name, idx) => {
+        const isCurrent = state.currentName === name;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `w-full text-left px-3 py-2 rounded-lg mb-1 text-sm truncate transition-colors ${isCurrent ? 'bg-accent/20 text-accent' : 'hover:bg-slate-700 text-slate-300'}`;
+        btn.textContent = name;
+        btn.title = name;
+        btn.dataset.idx = String(idx);
+        btn.addEventListener('click', () => selectImage(name));
+        el.appendChild(btn);
+      });
+    }
+
+    function selectImage(name) {
+      if (state.drawMode) endDrawMode();
+      state.currentName = name;
+      state.currentIndex = state.imageNames.indexOf(name);
+      if (state.currentIndex < 0) state.currentIndex = 0;
+      state.pendingEntryName = name;
+      renderImageList();
+      document.getElementById('currentName').textContent = name;
+      document.getElementById('mainImage').src = state.baseUrl + '/api/image/' + encodeURIComponent(name);
+      document.getElementById('mainImage').alt = name;
+      document.getElementById('bboxOverlay').innerHTML = '';
+      document.getElementById('verified').checked = false;
+      document.getElementById('scene').value = '';
+      document.getElementById('categories').value = '';
+      document.getElementById('suggestion').value = '';
+      document.getElementById('objectsBody').innerHTML = '';
+      document.getElementById('saveHint').classList.add('hidden');
+
+      const requestedName = name;
+      api('/api/entry/' + encodeURIComponent(name)).then(entry => {
+        if (state.pendingEntryName !== requestedName) return;
+        state.entry = entry;
+        state.sourceFile = entry.sourceFile || null;
+        document.getElementById('verified').checked = !!entry.verified;
+        const p = entry.parsed || {};
+        document.getElementById('scene').value = p.scene || '';
+        document.getElementById('categories').value = p.categories || '';
+        document.getElementById('suggestion').value = p.suggestion || '';
+        renderObjectsTable(p.objects || []);
+        drawBboxes(p.objects || []);
+      }).catch(() => {
+        if (state.pendingEntryName !== requestedName) return;
+        state.entry = { name, label: '', verified: false, parsed: { scene: '', objects: [], categories: '', suggestion: '' }, sourceFile: null };
+        state.sourceFile = null;
+        renderObjectsTable([]);
+      });
+    }
+
+    function goPrev() {
+      if (state.imageNames.length === 0) return;
+      let idx = state.currentIndex <= 0 ? state.imageNames.length - 1 : state.currentIndex - 1;
+      selectImage(state.imageNames[idx]);
+    }
+    function goNext() {
+      if (state.imageNames.length === 0) return;
+      let idx = state.currentIndex < 0 ? 0 : (state.currentIndex + 1) % state.imageNames.length;
+      selectImage(state.imageNames[idx]);
+    }
+    function doVerify() {
+      const cb = document.getElementById('verified');
+      if (!cb.checked) { cb.checked = true; }
+    }
+
+    function getImageContentRect() {
+      const img = document.getElementById('mainImage');
+      if (!img.complete || !img.naturalWidth) return null;
+      const cw = img.offsetWidth, ch = img.offsetHeight;
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      if (cw <= 0 || ch <= 0 || nw <= 0 || nh <= 0) return null;
+      const scale = Math.min(cw / nw, ch / nh);
+      const dw = nw * scale, dh = nh * scale;
+      const ox = (cw - dw) / 2, oy = (ch - dh) / 2;
+      return { ox, oy, dw, dh };
+    }
+
+    function getParsedFromForm() {
+      const objects = [];
+      document.querySelectorAll('#objectsBody tr').forEach(tr => {
+        const cat = tr.querySelector('.obj-cat')?.value?.trim();
+        const x_min = parseFloat(tr.querySelector('.obj-xmin')?.value) || 0;
+        const y_min = parseFloat(tr.querySelector('.obj-ymin')?.value) || 0;
+        const x_max = parseFloat(tr.querySelector('.obj-xmax')?.value) || 0;
+        const y_max = parseFloat(tr.querySelector('.obj-ymax')?.value) || 0;
+        if (cat) objects.push({ category: cat, x_min, y_min, x_max, y_max });
+      });
+      return {
+        scene: document.getElementById('scene').value.trim(),
+        objects,
+        categories: document.getElementById('categories').value.trim(),
+        suggestion: document.getElementById('suggestion').value.trim(),
+      };
+    }
+
+    function renderObjectsTable(objects) {
+      const tbody = document.getElementById('objectsBody');
+      tbody.innerHTML = objects.map((o, i) => `
+        <tr class="border-t border-slate-100 hover:bg-slate-50" data-idx="${i}">
+          <td class="py-1 px-2"><input type="text" class="obj-cat w-full border-0 bg-transparent text-sm" value="${escapeHtml(o.category)}" /></td>
+          <td class="py-1 px-1"><input type="number" step="0.01" class="obj-xmin w-14 border border-slate-200 rounded px-1 text-sm" value="${o.x_min}" /></td>
+          <td class="py-1 px-1"><input type="number" step="0.01" class="obj-ymin w-14 border border-slate-200 rounded px-1 text-sm" value="${o.y_min}" /></td>
+          <td class="py-1 px-1"><input type="number" step="0.01" class="obj-xmax w-14 border border-slate-200 rounded px-1 text-sm" value="${o.x_max}" /></td>
+          <td class="py-1 px-1"><input type="number" step="0.01" class="obj-ymax w-14 border border-slate-200 rounded px-1 text-sm" value="${o.y_max}" /></td>
+          <td class="py-1"><button type="button" class="removeObj text-red-500 hover:text-red-700 text-xs px-1">删除</button></td>
+        </tr>`).join('');
+      tbody.querySelectorAll('.removeObj').forEach(btn => {
+        btn.addEventListener('click', () => {
+          btn.closest('tr').remove();
+          syncBboxesFromForm();
+        });
+      });
+      tbody.querySelectorAll('input').forEach(inp => {
+        inp.addEventListener('change', syncBboxesFromForm);
+      });
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s ?? '';
+      return div.innerHTML;
+    }
+
+    function addObjectRow(obj) {
+      const o = obj || { category: '', x_min: 0, y_min: 0, x_max: 1, y_max: 1 };
+      const tbody = document.getElementById('objectsBody');
+      const tr = document.createElement('tr');
+      tr.className = 'border-t border-slate-100 hover:bg-slate-50';
+      tr.innerHTML = `
+        <td class="py-1 px-2"><input type="text" class="obj-cat w-full border border-slate-200 rounded px-1 text-sm" placeholder="类别" value="${escapeHtml(o.category)}" /></td>
+        <td class="py-1 px-1"><input type="number" step="0.01" class="obj-xmin w-14 border border-slate-200 rounded px-1 text-sm" value="${o.x_min}" /></td>
+        <td class="py-1 px-1"><input type="number" step="0.01" class="obj-ymin w-14 border border-slate-200 rounded px-1 text-sm" value="${o.y_min}" /></td>
+        <td class="py-1 px-1"><input type="number" step="0.01" class="obj-xmax w-14 border border-slate-200 rounded px-1 text-sm" value="${o.x_max}" /></td>
+        <td class="py-1 px-1"><input type="number" step="0.01" class="obj-ymax w-14 border border-slate-200 rounded px-1 text-sm" value="${o.y_max}" /></td>
+        <td class="py-1"><button type="button" class="removeObj text-red-500 hover:text-red-700 text-xs px-1">删除</button></td>`;
+      tr.querySelector('.removeObj').addEventListener('click', () => { tr.remove(); syncBboxesFromForm(); });
+      tr.querySelectorAll('input').forEach(inp => inp.addEventListener('change', syncBboxesFromForm));
+      tbody.appendChild(tr);
+      syncBboxesFromForm();
+    }
+
+    function startDrawMode() {
+      if (!state.currentName) return;
+      const rect = getImageContentRect();
+      if (!rect) return;
+      state.drawMode = true;
+      state.drawStart = null;
+      document.getElementById('drawOverlay').classList.add('draw-active');
+      document.getElementById('drawHint').classList.remove('hidden');
+      document.getElementById('drawPreviewRect').classList.add('hidden');
+    }
+
+    function endDrawMode() {
+      state.drawMode = false;
+      state.drawStart = null;
+      document.getElementById('drawOverlay').classList.remove('draw-active');
+      document.getElementById('drawHint').classList.add('hidden');
+      document.getElementById('drawPreviewRect').classList.add('hidden');
+    }
+
+    document.getElementById('addObject').addEventListener('click', () => {
+      startDrawMode();
+    });
+
+    const drawOverlay = document.getElementById('drawOverlay');
+    const drawPreview = document.getElementById('drawPreviewRect');
+    drawOverlay.addEventListener('mousedown', (e) => {
+      if (!state.drawMode || e.button !== 0) return;
+      const r = getImageContentRect();
+      if (!r) return;
+      state.drawStart = { x: e.offsetX, y: e.offsetY, contentRect: r };
+      drawPreview.style.left = e.offsetX + 'px';
+      drawPreview.style.top = e.offsetY + 'px';
+      drawPreview.style.width = '0';
+      drawPreview.style.height = '0';
+      drawPreview.classList.remove('hidden');
+    });
+    drawOverlay.addEventListener('mousemove', (e) => {
+      if (!state.drawMode || !state.drawStart) return;
+      const s = state.drawStart;
+      const left = Math.min(s.x, e.offsetX);
+      const top = Math.min(s.y, e.offsetY);
+      const width = Math.abs(e.offsetX - s.x);
+      const height = Math.abs(e.offsetY - s.y);
+      drawPreview.style.left = left + 'px';
+      drawPreview.style.top = top + 'px';
+      drawPreview.style.width = width + 'px';
+      drawPreview.style.height = height + 'px';
+    });
+    drawOverlay.addEventListener('mouseup', (e) => {
+      if (!state.drawMode || !state.drawStart || e.button !== 0) return;
+      const s = state.drawStart;
+      const r = s.contentRect;
+      const toNorm = (px, py) => ({
+        x: Math.max(0, Math.min(1, (px - r.ox) / r.dw)),
+        y: Math.max(0, Math.min(1, (py - r.oy) / r.dh))
+      });
+      const n1 = toNorm(s.x, s.y);
+      const n2 = toNorm(e.offsetX, e.offsetY);
+      const x_min = Math.round(Math.min(n1.x, n2.x) * 10000) / 10000;
+      const y_min = Math.round(Math.min(n1.y, n2.y) * 10000) / 10000;
+      const x_max = Math.round(Math.max(n1.x, n2.x) * 10000) / 10000;
+      const y_max = Math.round(Math.max(n1.y, n2.y) * 10000) / 10000;
+      if (x_max - x_min < 0.01 || y_max - y_min < 0.01) { endDrawMode(); return; }
+      addObjectRow({ category: '', x_min, y_min, x_max, y_max });
+      endDrawMode();
+    });
+    drawOverlay.addEventListener('mouseleave', () => {
+      if (state.drawMode && state.drawStart) endDrawMode();
+    });
+
+    function drawBboxes(objects) {
+      const svg = document.getElementById('bboxOverlay');
+      const img = document.getElementById('mainImage');
+      if (!img.complete || !img.naturalWidth) {
+        img.addEventListener('load', () => drawBboxes(objects));
+        return;
+      }
+      const cw = img.offsetWidth, ch = img.offsetHeight;
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      if (cw <= 0 || ch <= 0 || nw <= 0 || nh <= 0) return;
+      const scale = Math.min(cw / nw, ch / nh);
+      const dw = nw * scale, dh = nh * scale;
+      const ox = (cw - dw) / 2, oy = (ch - dh) / 2;
+      svg.setAttribute('viewBox', `0 0 ${dw} ${dh}`);
+      svg.setAttribute('width', dw);
+      svg.setAttribute('height', dh);
+      svg.style.left = ox + 'px';
+      svg.style.top = oy + 'px';
+      svg.innerHTML = (objects || []).map(o => {
+        const x = o.x_min * dw, y = o.y_min * dh, width = (o.x_max - o.x_min) * dw, height = (o.y_max - o.y_min) * dh;
+        return `<g><rect class="bbox" x="${x}" y="${y}" width="${width}" height="${height}"/><text class="bbox-label" x="${x}" y="${Math.max(y - 4, 12)}">${escapeHtml(o.category)}</text></g>`;
+      }).join('');
+    }
+
+    window.addEventListener('resize', () => {
+      if (state.currentName) drawBboxes(getParsedFromForm().objects);
+    });
+
+    function syncBboxesFromForm() {
+      drawBboxes(getParsedFromForm().objects);
+    }
+
+    /** 根据物体列表中的类别，自动更新「类别列表」输入框（去重、逗号分隔） */
+    function syncCategoriesFromObjects() {
+      const cats = [];
+      document.querySelectorAll('#objectsBody tr .obj-cat').forEach(inp => {
+        const v = (inp.value || '').trim();
+        if (v && !cats.includes(v)) cats.push(v);
+      });
+      document.getElementById('categories').value = cats.join(', ');
+    }
+
+    document.getElementById('saveBtn').addEventListener('click', () => {
+      if (!state.currentName) return;
+      syncCategoriesFromObjects();
+      const payload = {
+        name: state.currentName,
+        parsed: getParsedFromForm(),
+        verified: document.getElementById('verified').checked,
+        labelFile: state.sourceFile || undefined,
+      };
+      apiPost('/api/save', payload).then(res => {
+        const hint = document.getElementById('saveHint');
+        hint.textContent = res.ok ? '已保存' : (res.error || '保存失败');
+        hint.classList.remove('hidden');
+        setTimeout(() => hint.classList.add('hidden'), 2000);
+      }).catch(() => {
+        document.getElementById('saveHint').textContent = '保存失败';
+        document.getElementById('saveHint').classList.remove('hidden');
+      });
+    });
+
+    document.getElementById('verifyBtn').addEventListener('click', doVerify);
+    document.getElementById('prevBtn').addEventListener('click', goPrev);
+    document.getElementById('nextBtn').addEventListener('click', goNext);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && state.drawMode) { endDrawMode(); e.preventDefault(); return; }
+      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Enter') e.preventDefault();
+        if (e.key === 'Enter') { doVerify(); document.getElementById('saveBtn').click(); return; }
+        if (e.key === 'ArrowUp') { goPrev(); return; }
+        if (e.key === 'ArrowDown') { goNext(); return; }
+        return;
+      }
+      if (e.key === 'ArrowUp') { e.preventDefault(); goPrev(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); goNext(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); doVerify(); document.getElementById('saveBtn').click(); return; }
+    });
+
+    api('/api/config').then(cfg => {
+      state.imageNames = cfg.imageNames || [];
+      state.baseUrl = '';
+      const files = cfg.labelFiles || [];
+      document.getElementById('labelFileInfo').textContent = files.length
+        ? '已合并 ' + files.length + ' 个标签文件'
+        : '未找到 labels_*.json';
+      renderImageList();
+      if (state.imageNames.length) selectImage(state.imageNames[0]);
+    }).catch(() => {
+      document.getElementById('labelFileInfo').textContent = '无法加载配置';
+    });
+  </script>
+</body>
+</html>
