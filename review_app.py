@@ -159,34 +159,88 @@ def api_default_prompt():
     return jsonify({"prompt": DEFAULT_ANNOTATION_PROMPT})
 
 
+def _parse_video_params():
+    """从 request.form 解析视频滑窗参数，与 main.py 默认一致。"""
+    try:
+        step = int(request.form.get("video_step", 30))
+    except (TypeError, ValueError):
+        step = 30
+    try:
+        window_size = int(request.form.get("video_window_size", 1))
+    except (TypeError, ValueError):
+        window_size = 1
+    try:
+        max_frames = int(request.form.get("max_frames", 0))
+    except (TypeError, ValueError):
+        max_frames = 0
+    return step, window_size, max_frames
+
+
 @app.route("/api/import/upload", methods=["POST"])
 def api_import_upload():
-    """接收多文件上传，保存到 output_labels/images。"""
+    """接收多文件上传：图片直接保存到 images；视频按滑窗提取帧后保存到 images。"""
     if "files" not in request.files and "file" not in request.files:
         return jsonify({"ok": False, "error": "未选择文件"}), 400
     files = request.files.getlist("files") or request.files.getlist("file")
     if not files or (len(files) == 1 and (not files[0] or not files[0].filename)):
         return jsonify({"ok": False, "error": "未选择文件"}), 400
+    video_step, video_window_size, max_frames = _parse_video_params()
     images_dir = get_images_dir()
     images_dir.mkdir(parents=True, exist_ok=True)
-    allowed = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif"}
+    out_dir = get_output_dir()
+    allowed_image = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif"}
+    allowed_video = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
     saved = 0
     for f in files:
         if not f or not f.filename:
             continue
         suf = Path(f.filename).suffix.lower()
-        if suf not in allowed:
-            continue
-        name = _safe_filename(f.filename)
-        if not name.lower().endswith(suf):
-            name = name + suf
-        path = images_dir / name
-        try:
-            f.save(str(path))
-            saved += 1
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"保存失败: {e}"}), 500
-    return jsonify({"ok": True, "saved": saved, "message": f"已上传 {saved} 张图片"})
+        if suf in allowed_image:
+            name = _safe_filename(f.filename)
+            if not name.lower().endswith(suf):
+                name = name + suf
+            path = images_dir / name
+            try:
+                f.save(str(path))
+                saved += 1
+            except Exception as e:
+                return jsonify({"ok": False, "error": f"保存失败: {e}"}), 500
+        elif suf in allowed_video:
+            from frame_extractor import collect_media
+            temp_dir = out_dir / "upload_temp"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = _safe_filename(f.filename)
+            if not safe_name.lower().endswith(suf):
+                safe_name = safe_name + suf
+            video_path = temp_dir / safe_name
+            try:
+                f.save(str(video_path))
+                items = collect_media(
+                    str(video_path),
+                    video_step=video_step,
+                    video_window_size=video_window_size,
+                    max_video_frames=max_frames,
+                )
+                for name, image_bytes in items:
+                    dest = images_dir / name
+                    with open(dest, "wb") as out:
+                        out.write(image_bytes)
+                    saved += 1
+            except Exception as e:
+                if video_path.exists():
+                    try:
+                        video_path.unlink()
+                    except OSError:
+                        pass
+                return jsonify({"ok": False, "error": f"视频抽帧失败: {e}"}), 500
+            finally:
+                if video_path.exists():
+                    try:
+                        video_path.unlink()
+                    except OSError:
+                        pass
+        # 其他扩展名忽略
+    return jsonify({"ok": True, "saved": saved, "message": f"已导入 {saved} 张图片/帧"})
 
 
 def _get_image_names():
