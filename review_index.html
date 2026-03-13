@@ -26,6 +26,11 @@
     body { font-family: 'DM Sans', sans-serif; }
     .bbox { stroke: #0d9488; stroke-width: 2; fill: none; }
     .bbox-label { font-size: 11px; fill: #0d9488; font-weight: 600; }
+    .contour-poly { stroke: #0d9488; stroke-width: 2; fill: rgba(13, 148, 136, 0.15); }
+    .contour-label { font-size: 11px; fill: #0d9488; font-weight: 600; }
+    .mode-btn.active { background: #0d9488; color: white; }
+    .mode-btn:not(.active) { background: #f1f5f9; color: #475569; }
+    .mode-btn:not(.active):hover { background: #e2e8f0; }
     input[type="number"] { -moz-appearance: textfield; }
     input[type="number"]::-webkit-outer-spin-button,
     input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
@@ -72,9 +77,15 @@
           </div>
         </div>
       </div>
-      <div class="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-2 z-10">
-        <button type="button" id="prevBtn" class="px-4 py-2 rounded-lg bg-slate-600 text-white text-sm font-medium hover:bg-slate-700 shadow">上一张 ↑</button>
-        <button type="button" id="nextBtn" class="px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accentHover shadow">下一张 ↓</button>
+      <div class="absolute bottom-2 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-10">
+        <div class="flex gap-2">
+          <button type="button" id="prevBtn" class="px-4 py-2 rounded-lg bg-slate-600 text-white text-sm font-medium hover:bg-slate-700 shadow">上一张 ↑</button>
+          <button type="button" id="nextBtn" class="px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accentHover shadow">下一张 ↓</button>
+        </div>
+        <div class="flex gap-1 rounded-lg overflow-hidden border border-slate-300 bg-white shadow">
+          <button type="button" id="modeBbox" class="px-3 py-1.5 text-sm font-medium transition-colors mode-btn">目标框</button>
+          <button type="button" id="modeContour" class="px-3 py-1.5 text-sm font-medium transition-colors mode-btn">轮廓</button>
+        </div>
       </div>
     </div>
     <p class="text-sm text-slate-500 mt-1 truncate shrink-0" id="currentName"></p>
@@ -141,6 +152,7 @@
       sourceFile: null,
       drawMode: false,
       drawStart: null,  // { x, y, contentRect: { ox, oy, dw, dh } }
+      displayMode: 'bbox',  // 'bbox' | 'contour'：目标框模式 | 轮廓模式
     };
 
     function api(path) {
@@ -200,12 +212,15 @@
         document.getElementById('categories').value = p.categories || '';
         document.getElementById('suggestion').value = p.suggestion || '';
         renderObjectsTable(p.objects || []);
-        drawBboxes(p.objects || []);
+        updateDisplayModeUI();
+        drawOverlay();
       }).catch(() => {
         if (state.pendingEntryName !== requestedName) return;
-        state.entry = { name, label: '', verified: false, parsed: { scene: '', objects: [], categories: '', suggestion: '' }, sourceFile: null };
+        state.entry = { name, label: '', verified: false, parsed: { scene: '', objects: [], categories: '', suggestion: '' }, sourceFile: null, segmentation: [] };
         state.sourceFile = null;
         renderObjectsTable([]);
+        updateDisplayModeUI();
+        drawOverlay();
       });
     }
 
@@ -323,9 +338,9 @@
       startDrawMode();
     });
 
-    const drawOverlay = document.getElementById('drawOverlay');
+    const drawOverlayEl = document.getElementById('drawOverlay');
     const drawPreview = document.getElementById('drawPreviewRect');
-    drawOverlay.addEventListener('mousedown', (e) => {
+    drawOverlayEl.addEventListener('mousedown', (e) => {
       if (!state.drawMode || e.button !== 0) return;
       const r = getImageContentRect();
       if (!r) return;
@@ -336,7 +351,7 @@
       drawPreview.style.height = '0';
       drawPreview.classList.remove('hidden');
     });
-    drawOverlay.addEventListener('mousemove', (e) => {
+    drawOverlayEl.addEventListener('mousemove', (e) => {
       if (!state.drawMode || !state.drawStart) return;
       const s = state.drawStart;
       const left = Math.min(s.x, e.offsetX);
@@ -348,7 +363,7 @@
       drawPreview.style.width = width + 'px';
       drawPreview.style.height = height + 'px';
     });
-    drawOverlay.addEventListener('mouseup', (e) => {
+    drawOverlayEl.addEventListener('mouseup', (e) => {
       if (!state.drawMode || !state.drawStart || e.button !== 0) return;
       const s = state.drawStart;
       const r = s.contentRect;
@@ -366,40 +381,93 @@
       addObjectRow({ category: '', x_min, y_min, x_max, y_max });
       endDrawMode();
     });
-    drawOverlay.addEventListener('mouseleave', () => {
+    drawOverlayEl.addEventListener('mouseleave', () => {
       if (state.drawMode && state.drawStart) endDrawMode();
     });
 
-    function drawBboxes(objects) {
-      const svg = document.getElementById('bboxOverlay');
+    function getOverlayTransform() {
       const img = document.getElementById('mainImage');
-      if (!img.complete || !img.naturalWidth) {
-        img.addEventListener('load', () => drawBboxes(objects));
-        return;
-      }
+      if (!img.complete || !img.naturalWidth) return null;
       const cw = img.offsetWidth, ch = img.offsetHeight;
       const nw = img.naturalWidth, nh = img.naturalHeight;
-      if (cw <= 0 || ch <= 0 || nw <= 0 || nh <= 0) return;
+      if (cw <= 0 || ch <= 0 || nw <= 0 || nh <= 0) return null;
       const scale = Math.min(cw / nw, ch / nh);
       const dw = nw * scale, dh = nh * scale;
       const ox = (cw - dw) / 2, oy = (ch - dh) / 2;
+      return { ox, oy, dw, dh };
+    }
+
+    /** 根据当前 displayMode 和 entry/parsed 数据绘制 overlay：目标框用 bbox，轮廓用 contour */
+    function drawOverlay() {
+      const svg = document.getElementById('bboxOverlay');
+      const img = document.getElementById('mainImage');
+      if (!img.complete || !img.naturalWidth) {
+        img.addEventListener('load', () => drawOverlay());
+        return;
+      }
+      const t = getOverlayTransform();
+      if (!t) return;
+      const { dw, dh } = t;
       svg.setAttribute('viewBox', `0 0 ${dw} ${dh}`);
       svg.setAttribute('width', dw);
       svg.setAttribute('height', dh);
-      svg.style.left = ox + 'px';
-      svg.style.top = oy + 'px';
+      svg.style.left = t.ox + 'px';
+      svg.style.top = t.oy + 'px';
+
+      const seg = (state.entry && state.entry.segmentation) ? state.entry.segmentation : [];
+
+      if (state.displayMode === 'contour') {
+        if (!seg.length) {
+          svg.innerHTML = '';
+          return;
+        }
+        svg.innerHTML = seg.map(s => {
+          const pts = (s.contour || []);
+          if (pts.length < 2) return '';
+          const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0] * dw} ${p[1] * dh}`).join(' ') + ' Z';
+          return `<g><path class="contour-poly" d="${d}"/><text class="contour-label" x="${pts[0][0] * dw}" y="${Math.max(pts[0][1] * dh - 4, 12)}">${escapeHtml(s.category || '')}</text></g>`;
+        }).join('');
+        return;
+      }
+
+      // 目标框模式：优先用 segmentation[].bbox，无则用表单解析的 objects
+      let objects = [];
+      if (seg.length) {
+        objects = seg.map(s => {
+          const b = s.bbox;
+          if (Array.isArray(b) && b.length >= 4) return { category: s.category, x_min: b[0], y_min: b[1], x_max: b[2], y_max: b[3] };
+          return null;
+        }).filter(Boolean);
+      }
+      if (!objects.length) objects = getParsedFromForm().objects || [];
       svg.innerHTML = (objects || []).map(o => {
         const x = o.x_min * dw, y = o.y_min * dh, width = (o.x_max - o.x_min) * dw, height = (o.y_max - o.y_min) * dh;
         return `<g><rect class="bbox" x="${x}" y="${y}" width="${width}" height="${height}"/><text class="bbox-label" x="${x}" y="${Math.max(y - 4, 12)}">${escapeHtml(o.category)}</text></g>`;
       }).join('');
     }
 
+    function updateDisplayModeUI() {
+      document.getElementById('modeBbox').classList.toggle('active', state.displayMode === 'bbox');
+      document.getElementById('modeContour').classList.toggle('active', state.displayMode === 'contour');
+    }
+
+    document.getElementById('modeBbox').addEventListener('click', () => {
+      state.displayMode = 'bbox';
+      updateDisplayModeUI();
+      drawOverlay();
+    });
+    document.getElementById('modeContour').addEventListener('click', () => {
+      state.displayMode = 'contour';
+      updateDisplayModeUI();
+      drawOverlay();
+    });
+
     window.addEventListener('resize', () => {
-      if (state.currentName) drawBboxes(getParsedFromForm().objects);
+      if (state.currentName) drawOverlay();
     });
 
     function syncBboxesFromForm() {
-      drawBboxes(getParsedFromForm().objects);
+      drawOverlay();
     }
 
     /** 根据物体列表中的类别，自动更新「类别列表」输入框（去重、逗号分隔） */

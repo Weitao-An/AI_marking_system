@@ -118,13 +118,18 @@ def api_entry(name):
     label_text = entry.get("label", "") if entry else ""
     parsed = parse_label(label_text)
     source_path = name_to_path.get(name_stripped)
-    return jsonify({
+    result = {
         "name": name_stripped,
         "label": label_text,
         "verified": entry.get("verified", False) if entry else False,
         "parsed": parsed,
         "sourceFile": source_path.name if source_path else None,
-    })
+    }
+    if entry and "segmentation" in entry:
+        result["segmentation"] = entry["segmentation"]
+    else:
+        result["segmentation"] = []
+    return jsonify(result)
 
 
 @app.route("/api/image/<path:name>")
