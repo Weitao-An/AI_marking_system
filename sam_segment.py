@@ -12,7 +12,7 @@ import json
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 
 # 若指定了 --device cpu 且当前环境是 .venv_gpu（CUDA 版 PyTorch），先尝试导入 torch；
 # 若因 torch_cuda.dll 失败，直接提示先退出 .venv_gpu 再用默认 Python 运行，避免进入冗长报错。
@@ -307,9 +307,13 @@ def process_labels_file(
     load_from_hf: bool = True,
     use_modelscope: bool = False,
     image_name: Optional[str] = None,
+    skip_verified: bool = False,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> None:
     """
     读取 labels JSON，对每条条目对应的图片用 SAM 3 生成轮廓，写回同一文件。
+    skip_verified: 为 True 时跳过 verified=True 的条目。
+    progress_callback(current, total, phase): 进度回调，phase 为 'sam3'。
     """
     with open(labels_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -334,10 +338,22 @@ def process_labels_file(
             continue
         by_name.setdefault(name, []).append((i, entry))
 
-    for name, indices_entries in by_name.items():
+    to_process = [
+        (name, indices_entries)
+        for name, indices_entries in by_name.items()
+        if not (
+            skip_verified
+            and all((e.get("verified") for _, e in indices_entries))
+        )
+    ]
+    total = len(to_process)
+
+    for current, (name, indices_entries) in enumerate(to_process, 1):
         image_path = images_dir / name
         if not image_path.is_file():
             print(f"跳过（图片不存在）: {name}")
+            if progress_callback:
+                progress_callback(current, total, "sam3")
             continue
         indices = [x[0] for x in indices_entries]
         entries = [x[1] for x in indices_entries]
@@ -345,6 +361,8 @@ def process_labels_file(
         for idx, entry in zip(indices, entries):
             data[idx] = entry
         print(f"已处理: {name}")
+        if progress_callback:
+            progress_callback(current, total, "sam3")
 
     with open(labels_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 人工验证标注：Web UI，展示 images 内图片与对应标签，支持编辑并保存。
+并提供素材导入页：上传图片、设置提示词、一键生成标注并跑 SAM3。
 """
 import json
 import os
+import re
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Thread
 
-from flask import Flask, send_from_directory, request, jsonify
+from flask import Flask, send_from_directory, request, jsonify, Response
 from label_parser import parse_label, format_label
 
 app = Flask(__name__, static_folder=None)
@@ -87,9 +91,20 @@ def save_labels(entries: list, path: Path) -> None:
                 f.write(f"=== {r.get('name', '')} ===\n{r.get('label', '')}\n\n")
 
 
+def _safe_filename(name: str) -> str:
+    """只保留安全字符，避免路径遍历。"""
+    name = os.path.basename(name)
+    return re.sub(r"[^\w.\-]", "_", name) or "image"
+
+
 @app.route("/")
 def index():
     return send_from_directory(Path(__file__).parent, "review_index.html")
+
+
+@app.route("/import")
+def import_page():
+    return send_from_directory(Path(__file__).parent, "import_index.html")
 
 
 @app.route("/api/config")
@@ -136,6 +151,212 @@ def api_entry(name):
 def api_image(name):
     images_dir = get_images_dir()
     return send_from_directory(images_dir, name)
+
+
+@app.route("/api/default-prompt", methods=["GET"])
+def api_default_prompt():
+    from qwen_labeler import DEFAULT_ANNOTATION_PROMPT
+    return jsonify({"prompt": DEFAULT_ANNOTATION_PROMPT})
+
+
+@app.route("/api/import/upload", methods=["POST"])
+def api_import_upload():
+    """接收多文件上传，保存到 output_labels/images。"""
+    if "files" not in request.files and "file" not in request.files:
+        return jsonify({"ok": False, "error": "未选择文件"}), 400
+    files = request.files.getlist("files") or request.files.getlist("file")
+    if not files or (len(files) == 1 and (not files[0] or not files[0].filename)):
+        return jsonify({"ok": False, "error": "未选择文件"}), 400
+    images_dir = get_images_dir()
+    images_dir.mkdir(parents=True, exist_ok=True)
+    allowed = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif"}
+    saved = 0
+    for f in files:
+        if not f or not f.filename:
+            continue
+        suf = Path(f.filename).suffix.lower()
+        if suf not in allowed:
+            continue
+        name = _safe_filename(f.filename)
+        if not name.lower().endswith(suf):
+            name = name + suf
+        path = images_dir / name
+        try:
+            f.save(str(path))
+            saved += 1
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"保存失败: {e}"}), 500
+    return jsonify({"ok": True, "saved": saved, "message": f"已上传 {saved} 张图片"})
+
+
+def _get_image_names():
+    """当前 images 目录下的图片名列表（有序）。"""
+    images_dir = get_images_dir()
+    if not images_dir.is_dir():
+        return []
+    return [
+        f.name
+        for f in sorted(images_dir.iterdir())
+        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+    ]
+
+
+def _unverified_names(names, by_name):
+    """在 names 中且未通过人工验证的图片名。"""
+    return [n for n in names if n not in by_name or not by_name[n].get("verified")]
+
+
+def _merge_verified_into_labels_file(labels_path: Path, names: list, by_name: dict, new_entries: list):
+    """将已验证条目与本次新结果合并，按 names 顺序写回 labels_path。"""
+    by_new = {e["name"]: e for e in new_entries}
+    full = []
+    for n in names:
+        if n in by_name and by_name[n].get("verified"):
+            full.append(by_name[n])
+        else:
+            full.append(by_new.get(n, {"name": n, "label": "", "verified": False}))
+    with open(labels_path, "w", encoding="utf-8") as f:
+        json.dump(full, f, ensure_ascii=False, indent=2)
+
+
+@app.route("/api/process", methods=["POST"])
+def api_process():
+    """
+    一键处理：仅对未通过人工验证的图片跑 Qwen 打标 + SAM3；已验证的跳过。
+    合并已验证条目与新结果后写回，再对整份文件跑 SAM3（SAM3 内部跳过已验证条目）。
+    """
+    data = request.get_json() or {}
+    prompt = (data.get("prompt") or "").strip()
+    images_dir = get_images_dir()
+    out_dir = get_output_dir()
+    if not images_dir.is_dir():
+        return jsonify({"ok": False, "error": "图片目录不存在，请先上传素材"}), 400
+    names = _get_image_names()
+    if not names:
+        return jsonify({"ok": False, "error": "images 目录下没有图片，请先上传素材"}), 400
+    by_name, _ = get_merged_entries()
+    unverified = _unverified_names(names, by_name)
+    if not unverified:
+        return jsonify({
+            "ok": True,
+            "message": "所有图片已通过人工验证，无需处理",
+            "allVerified": True,
+        })
+    try:
+        from main import run_pipeline
+        labels_path = run_pipeline(
+            input_path=str(images_dir),
+            output_dir=str(out_dir),
+            prompt=prompt or None,
+            only_image_names=unverified,
+        )
+        if not labels_path:
+            return jsonify({"ok": False, "error": "未生成任何标注"}), 500
+        with open(labels_path, "r", encoding="utf-8") as f:
+            new_entries = json.load(f)
+        _merge_verified_into_labels_file(labels_path, names, by_name, new_entries)
+        from sam_segment import process_labels_file
+        process_labels_file(labels_path, images_dir, use_modelscope=True, skip_verified=True)
+        return jsonify({
+            "ok": True,
+            "labelFile": labels_path.name,
+            "message": "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看",
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/process/stream", methods=["POST"])
+def api_process_stream():
+    """
+    与 /api/process 逻辑相同，但通过 SSE 流式返回进度：progress / done / error。
+    """
+    data = request.get_json() or {}
+    prompt = (data.get("prompt") or "").strip()
+    images_dir = get_images_dir()
+    out_dir = get_output_dir()
+    if not images_dir.is_dir():
+        return _sse_json({"ok": False, "error": "图片目录不存在，请先上传素材"}, event="error")
+    names = _get_image_names()
+    if not names:
+        return _sse_json({"ok": False, "error": "images 目录下没有图片，请先上传素材"}, event="error")
+    by_name, _ = get_merged_entries()
+    unverified = _unverified_names(names, by_name)
+    if not unverified:
+        return _sse_json({
+            "ok": True,
+            "message": "所有图片已通过人工验证，无需处理",
+            "allVerified": True,
+        }, event="done")
+
+    q = Queue()
+
+    def run():
+        try:
+            from main import run_pipeline
+            from sam_segment import process_labels_file
+
+            def on_progress(current, total, phase):
+                q.put({"type": "progress", "current": current, "total": total, "phase": phase})
+
+            labels_path = run_pipeline(
+                input_path=str(images_dir),
+                output_dir=str(out_dir),
+                prompt=prompt or None,
+                only_image_names=unverified,
+                progress_callback=on_progress,
+            )
+            if not labels_path:
+                q.put({"type": "error", "error": "未生成任何标注"})
+                return
+            with open(labels_path, "r", encoding="utf-8") as f:
+                new_entries = json.load(f)
+            _merge_verified_into_labels_file(labels_path, names, by_name, new_entries)
+            process_labels_file(
+                labels_path,
+                images_dir,
+                use_modelscope=True,
+                skip_verified=True,
+                progress_callback=on_progress,
+            )
+            q.put({"type": "done", "ok": True, "labelFile": labels_path.name, "message": "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看"})
+        except Exception as e:
+            q.put({"type": "error", "error": str(e)})
+
+    Thread(target=run, daemon=True).start()
+
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=300)
+            except Empty:
+                yield _sse_line({"type": "error", "error": "处理超时"})
+                break
+            if msg.get("type") == "done":
+                yield _sse_line(msg, event="done")
+                break
+            if msg.get("type") == "error":
+                yield _sse_line(msg, event="error")
+                break
+            yield _sse_line(msg, event="progress")
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _sse_line(data: dict, event: str = "message"):
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _sse_json(data: dict, event: str = "message"):
+    return Response(
+        _sse_line(data, event=event),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.route("/api/save", methods=["POST"])

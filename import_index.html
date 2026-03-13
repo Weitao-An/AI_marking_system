@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>素材导入与一键标注</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['DM Sans', 'sans-serif'] },
+          colors: {
+            panel: '#1a1d24',
+            card: '#23262d',
+            accent: '#0d9488',
+            accentHover: '#0f766e',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'DM Sans', sans-serif; }
+    textarea { resize: vertical; min-height: 120px; }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+  <div class="max-w-3xl mx-auto p-6 space-y-6">
+    <header class="flex items-center justify-between border-b border-slate-200 pb-4">
+      <h1 class="text-xl font-semibold text-slate-800">素材导入与一键标注</h1>
+      <a href="/" class="text-sm font-medium text-accent hover:text-accentHover">→ 标注验证</a>
+    </header>
+
+    <!-- 1. 原始素材本地导入 -->
+    <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">1. 原始素材导入</h2>
+      <p class="text-sm text-slate-600 mb-3">选择本地图片（jpg/png/bmp/webp），上传后将保存到当前项目的 images 目录，用于后续打标与 SAM3 轮廓。</p>
+      <div class="flex flex-wrap items-center gap-3">
+        <label class="cursor-pointer">
+          <span class="inline-flex items-center px-4 py-2 rounded-lg bg-slate-200 text-slate-700 text-sm font-medium hover:bg-slate-300">选择图片</span>
+          <input type="file" id="fileInput" class="hidden" accept=".jpg,.jpeg,.png,.bmp,.webp,.gif" multiple />
+        </label>
+        <button type="button" id="uploadBtn" class="px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accentHover disabled:opacity-50 disabled:cursor-not-allowed" disabled>上传</button>
+        <span id="uploadStatus" class="text-sm text-slate-500"></span>
+      </div>
+      <p id="imageCount" class="text-xs text-slate-400 mt-2">当前 images 目录：加载中…</p>
+    </section>
+
+    <!-- 2. 标注模型提示词 -->
+    <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">2. 标注模型提示词</h2>
+      <p class="text-sm text-slate-600 mb-3">用于修改标注模型（Qwen 视觉）的识别提示词，可按任务需求编辑。留空则使用默认提示词。</p>
+      <textarea id="promptInput" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-accent/30 focus:border-accent" placeholder="加载默认提示词中…"></textarea>
+      <div class="mt-2 flex gap-2">
+        <button type="button" id="loadDefaultPrompt" class="text-xs text-accent hover:text-accentHover font-medium">恢复默认提示词</button>
+      </div>
+    </section>
+
+    <!-- 3. 一键处理 -->
+    <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">3. 开始处理</h2>
+      <p class="text-sm text-slate-600 mb-4">仅对<strong>未通过人工验证</strong>的图片执行：Qwen 打标 → SAM3 轮廓。已验证的图片会跳过。处理时间取决于待处理数量与接口速度。</p>
+      <button type="button" id="processBtn" class="w-full py-3 rounded-lg bg-accent text-white font-medium hover:bg-accentHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+        生成标注并运行 SAM3
+      </button>
+      <div id="progressWrap" class="mt-3 hidden">
+        <div class="flex justify-between text-xs text-slate-500 mb-1">
+          <span id="progressPhase">准备中…</span>
+          <span id="progressPct">0%</span>
+        </div>
+        <div class="h-2 bg-slate-200 rounded-full overflow-hidden">
+          <div id="progressBar" class="h-full bg-accent transition-all duration-300" style="width: 0%"></div>
+        </div>
+      </div>
+      <p id="processStatus" class="text-sm mt-3 min-h-[1.5rem] text-slate-600"></p>
+    </section>
+  </div>
+
+  <script>
+    const state = { baseUrl: '' };
+
+    function api(path) {
+      return fetch(state.baseUrl + path).then(r => r.json());
+    }
+
+    function refreshImageCount() {
+      api('/api/config').then(cfg => {
+        const n = (cfg.imageNames || []).length;
+        document.getElementById('imageCount').textContent = `当前 images 目录：${n} 张图片`;
+        document.getElementById('processBtn').disabled = n === 0;
+      }).catch(() => {
+        document.getElementById('imageCount').textContent = '当前 images 目录：获取失败';
+      });
+    }
+
+    function loadDefaultPrompt() {
+      api('/api/default-prompt').then(data => {
+        document.getElementById('promptInput').value = data.prompt || '';
+        document.getElementById('promptInput').placeholder = '可在此修改标注模型使用的提示词';
+      }).catch(() => {
+        document.getElementById('promptInput').placeholder = '获取默认提示词失败';
+      });
+    }
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      const files = e.target.files;
+      document.getElementById('uploadBtn').disabled = !files || files.length === 0;
+      document.getElementById('uploadStatus').textContent = files && files.length ? `已选 ${files.length} 个文件` : '';
+    });
+
+    document.getElementById('uploadBtn').addEventListener('click', () => {
+      const input = document.getElementById('fileInput');
+      const files = input.files;
+      if (!files || files.length === 0) return;
+      const form = new FormData();
+      for (let i = 0; i < files.length; i++) form.append('files', files[i]);
+      document.getElementById('uploadStatus').textContent = '上传中…';
+      document.getElementById('uploadBtn').disabled = true;
+      fetch(state.baseUrl + '/api/import/upload', {
+        method: 'POST',
+        body: form,
+      })
+        .then(r => r.json())
+        .then(data => {
+          document.getElementById('uploadStatus').textContent = data.ok ? (data.message || `已上传 ${data.saved} 张`) : (data.error || '上传失败');
+          input.value = '';
+          document.getElementById('uploadBtn').disabled = true;
+          refreshImageCount();
+        })
+        .catch(() => {
+          document.getElementById('uploadStatus').textContent = '上传失败';
+          document.getElementById('uploadBtn').disabled = false;
+        });
+    });
+
+    document.getElementById('loadDefaultPrompt').addEventListener('click', loadDefaultPrompt);
+
+    document.getElementById('processBtn').addEventListener('click', () => {
+      const statusEl = document.getElementById('processStatus');
+      const btn = document.getElementById('processBtn');
+      const progressWrap = document.getElementById('progressWrap');
+      const progressBar = document.getElementById('progressBar');
+      const progressPhase = document.getElementById('progressPhase');
+      const progressPct = document.getElementById('progressPct');
+      const prompt = document.getElementById('promptInput').value.trim();
+      statusEl.classList.remove('text-red-600', 'text-green-600');
+      statusEl.textContent = '';
+      progressWrap.classList.remove('hidden');
+      progressBar.style.width = '0%';
+      progressPhase.textContent = '准备中…';
+      progressPct.textContent = '0%';
+      btn.disabled = true;
+
+      function setProgress(percent, phaseText) {
+        progressBar.style.width = percent + '%';
+        progressPct.textContent = Math.round(percent) + '%';
+        progressPhase.textContent = phaseText;
+      }
+
+      fetch(state.baseUrl + '/api/process/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt || undefined }),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const err = await res.text();
+            throw new Error(err || res.statusText);
+          }
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          function handleEvent(eventName, data) {
+            try {
+              if (eventName === 'progress' && data.phase) {
+                const p = data.total ? (data.current / data.total) * 100 : 0;
+                const label = data.phase === 'qwen' ? 'Qwen 打标' : 'SAM3 轮廓';
+                const segment = data.phase === 'qwen' ? 0 : 50;
+                setProgress(segment + p * 0.5, label + ' ' + data.current + '/' + data.total);
+              } else if (eventName === 'done') {
+                setProgress(100, '完成');
+                progressWrap.classList.add('hidden');
+                if (data.allVerified) {
+                  statusEl.textContent = data.message || '所有图片已通过人工验证，无需处理。';
+                } else {
+                  statusEl.innerHTML = '<span class="text-green-600">' + (data.message || '处理完成') + '</span> <a href="/" class="text-accent hover:underline">前往标注验证</a>';
+                }
+                refreshImageCount();
+              } else if (eventName === 'error') {
+                progressWrap.classList.add('hidden');
+                statusEl.textContent = '失败：' + (data.error || '未知错误');
+                statusEl.classList.add('text-red-600');
+              }
+            } catch (_) {}
+          }
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const parts = buf.split('\n\n');
+            buf = parts.pop() || '';
+            for (const block of parts) {
+              let eventName = '';
+              let dataStr = '';
+              for (const line of block.split('\n')) {
+                if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
+              }
+              if (dataStr) {
+                try {
+                  const data = JSON.parse(dataStr);
+                  handleEvent(eventName, data);
+                } catch (_) {}
+              }
+            }
+          }
+          if (buf.trim()) {
+            let eventName = '';
+            let dataStr = '';
+            for (const line of buf.split('\n')) {
+              if (line.startsWith('event:')) eventName = line.slice(6).trim();
+              else if (line.startsWith('data:')) dataStr = line.slice(5).trim();
+            }
+            if (dataStr) {
+              try {
+                const data = JSON.parse(dataStr);
+                handleEvent(eventName, data);
+              } catch (_) {}
+            }
+          }
+        })
+        .catch((e) => {
+          progressWrap.classList.add('hidden');
+          statusEl.textContent = '请求失败：' + (e.message || '网络错误');
+          statusEl.classList.add('text-red-600');
+        })
+        .finally(() => {
+          btn.disabled = false;
+        });
+    });
+
+    loadDefaultPrompt();
+    refreshImageCount();
+  </script>
+</body>
+</html>

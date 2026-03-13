@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 from datetime import datetime
+from typing import Callable
 
 from config import QWEN_API_KEY, DEFAULT_WINDOW_STEP, DEFAULT_WINDOW_SIZE
 from frame_extractor import collect_media
@@ -20,9 +21,16 @@ def run_pipeline(
     max_video_frames: int = 0,
     model: str = "qwen3-vl-plus",
     api_key: str = "",
+    prompt: str | None = None,
+    only_image_names: list | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ):
     """
     完整流程：收集媒体 -> 逐张调用 Qwen 打标 -> 保存结果。
+    若传入 prompt 则作为标注模型的提示词，否则使用默认提示词。
+    only_image_names: 若提供则只处理这些图片名（用于跳过已验证的）。
+    progress_callback(current, total, phase): 进度回调，phase 为 'qwen'。
+    返回生成的 labels 文件路径。
     """
     if not QWEN_API_KEY and not api_key:
         raise ValueError("请设置 QWEN_API_KEY 或 DASHSCOPE_API_KEY（在 .env 中）或通过参数传入 api_key")
@@ -49,9 +57,17 @@ def run_pipeline(
     )
     if not items:
         print("未找到任何可处理的图片或帧，退出。")
-        return
+        return None
+    if only_image_names is not None:
+        allow = set(only_image_names)
+        items = [(n, b) for n, b in items if n in allow]
+    if not items:
+        print("过滤后无待处理图片，退出。")
+        return None
 
-    print(f"共 {len(items)} 张待打标")
+    _prompt = prompt if prompt else DEFAULT_ANNOTATION_PROMPT
+    total = len(items)
+    print(f"共 {total} 张待打标")
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     # 图片保存目录：与标签同目录下 images 子文件夹，便于人工验证时看图对标签
@@ -67,11 +83,11 @@ def run_pipeline(
         with open(image_file, "wb") as f:
             f.write(image_bytes)
 
-        print(f"  [{i}/{len(items)}] {name} ... ", end="", flush=True)
+        print(f"  [{i}/{total}] {name} ... ", end="", flush=True)
         try:
             label_text = label_image_with_qwen(
                 image_bytes=image_bytes,
-                prompt=DEFAULT_ANNOTATION_PROMPT,
+                prompt=_prompt,
                 model=model,
                 api_key=key,
             )
@@ -80,6 +96,8 @@ def run_pipeline(
         except Exception as e:
             print(f"失败: {e}")
             results.append({"name": name, "label": "", "error": str(e)})
+        if progress_callback:
+            progress_callback(i, total, "qwen")
 
     # 保存汇总结果
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -95,7 +113,7 @@ def run_pipeline(
             f.write(f"=== {r['name']} ===\n{r.get('label', r.get('error', ''))}\n\n")
     print(f"文本摘要: {txt_file}")
     print(f"图片已保存到: {images_dir}（命名与标签中的 name 一致，便于人工验证）")
-    return results
+    return summary_file
 
 
 def main():
