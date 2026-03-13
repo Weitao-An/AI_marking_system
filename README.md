@@ -2,10 +2,12 @@
 
 本步骤实现：**从本地读取视频（滑窗提取帧）或图片，并上传到 Qwen（通义千问）进行自动打标**。使用阿里云百炼 DashScope 的视觉 API。
 
+**完整安装流程（环境、依赖、SAM 3、ModelScope、验证）见 [INSTALL.md](INSTALL.md)。**
+
 ## 环境准备
 
 ```bash
-cd "c:\Users\123\Desktop\AI标注模型"
+cd "c:\Users\123\Desktop\AI-Labeling-Model"
 pip install -r requirements.txt
 ```
 
@@ -110,10 +112,65 @@ python review_app.py --port 5050
 
 ---
 
+## SAM 3 背景分离（目标外轮廓）
+
+使用 [SAM 3 (Segment Anything Model 3)](https://github.com/facebookresearch/sam3) 对标注结果做背景分离，根据 labels 中的 bbox 生成每个目标的外轮廓坐标，并写回同一 `labels_*.json`。
+
+### 环境要求
+
+- Python 3.12+
+- PyTorch 2.7+（建议 CUDA 12.6+）
+- 权重下载二选一：
+  - **国内推荐**：[ModelScope 镜像](https://modelscope.cn/models/facebook/sam3)，无需申请，运行时加 `--modelscope`
+  - 或 [Hugging Face](https://huggingface.co/facebook/sam3) 申请访问后 `huggingface-cli login`
+
+### 安装 SAM 3 依赖
+
+```bash
+pip install torch torchvision
+pip install "git+https://github.com/facebookresearch/sam3.git"
+# 使用 ModelScope 镜像时还需安装
+pip install modelscope
+```
+
+### 使用方法
+
+```bash
+# 从 ModelScope 镜像下载权重（国内推荐，无需 HF 账号）
+python sam_segment.py --modelscope
+
+# 指定标签与图片目录 + ModelScope 镜像
+python sam_segment.py output_labels/labels_20260311_142146.json --images-dir output_labels/images --modelscope
+
+# 只处理某一张图
+python sam_segment.py output_labels/labels_20260311_142146.json --image 9e39ce28-9c3b-40f8-9843-d6e868f2e962.png --modelscope
+
+# 不使用镜像时，从 Hugging Face 下载（需先申请权重并 login）
+python sam_segment.py output_labels/labels_20260311_142146.json
+
+# 使用本地已下载的权重
+python sam_segment.py output_labels/labels_20260311_142146.json --checkpoint /path/to/sam3.pt --no-hf
+
+# 使用 CPU
+python sam_segment.py output_labels/labels_20260311_142146.json --modelscope --device cpu
+```
+
+### 输出说明
+
+每条图片在 JSON 中会新增 **`segmentation`** 数组，每个元素对应一个目标：
+
+- **category**：类别名（与物体列表一致）
+- **bbox**：归一化 bbox `[x_min, y_min, x_max, y_max]`
+- **contour**：外轮廓多边形，归一化坐标 `[[x1,y1], [x2,y2], ...]`，可直接用于分割标注或可视化
+
+若某目标 SAM 预测失败，该条会带 **error** 字段且 **contour** 为空数组。
+
+---
+
 ## 项目结构
 
 ```
-AI标注模型/
+AI-Labeling-Model/
 ├── .env                 # QWEN_API_KEY（勿提交）
 ├── .env.example
 ├── .gitignore
@@ -124,8 +181,9 @@ AI标注模型/
 ├── main.py              # 主流程入口
 ├── review_app.py        # 人工验证 Web 服务
 ├── review_index.html    # 人工验证前端页面
+├── sam_segment.py       # SAM 背景分离，写回目标外轮廓到 labels JSON
 ├── requirements.txt
 └── README.md
 ```
 
-下一步可在此基础上增加：算法抠像（如 Grounded-SAM）、领域随机化与合成数据、特种蒸馏等环节。
+下一步可在此基础上增加：Grounded-SAM、领域随机化与合成数据、特种蒸馏等环节。

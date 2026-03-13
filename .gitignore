@@ -24,3 +24,5 @@ Thumbs.db
 *.swp
 *.swo
 /output_labels
+/.venv_gpu
+/sam3_repo

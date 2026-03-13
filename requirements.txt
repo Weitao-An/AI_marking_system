@@ -1,4 +1,22 @@
+# ========== 基础：打标 + 审核 ==========
 opencv-python>=4.8.0
 openai>=1.0.0
 python-dotenv>=1.0.0
 flask>=3.0.0
+
+# ========== SAM 3 背景分离（sam_segment.py），可选 ==========
+# 需 Python >= 3.12。SAM 3 本体需本地安装：pip install -e sam3_repo（先 git clone sam3 到 sam3_repo）
+torch>=2.7.0
+torchvision>=0.22.0
+modelscope>=1.9.0
+# SAM 3 推理时实际用到的依赖（官方 pyproject 未全列或为可选，缺一都会报 No module named 'xxx'）
+huggingface_hub>=0.20.0
+einops>=0.7.0
+pycocotools>=2.0.0
+psutil>=5.9.0
+# 若使用 ModelScope 下载权重，运行时加 --modelscope
+
+# 说明：
+# - triton：未加入依赖；Windows 下无 triton 时，项目内 sam3_repo 已做 OpenCV 回退，无需安装。
+# - decord：仅视频数据加载需要；纯图像推理可不装，sam3_repo 中已做可选导入。
+# - pip install -e sam3_repo 会装成 numpy<2，与 opencv 的 numpy>=2 冲突属已知，一般不影响读图。
