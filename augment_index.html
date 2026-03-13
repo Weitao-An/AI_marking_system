@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>边缘情形增强</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['DM Sans', 'sans-serif'] },
+          colors: {
+            panel: '#1a1d24',
+            card: '#23262d',
+            accent: '#0d9488',
+            accentHover: '#0f766e',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'DM Sans', sans-serif; }
+    .prompt-line { white-space: pre-wrap; }
+  </style>
+</head>
+<body class="bg-slate-100 h-screen w-screen flex overflow-hidden">
+  <!-- 左侧：已验证图片列表 -->
+  <aside class="w-56 min-w-[180px] max-w-[300px] bg-panel text-white flex flex-col shrink-0 shadow-xl">
+    <div class="p-3 border-b border-slate-600 shrink-0">
+      <h1 class="text-base font-semibold text-slate-100">边缘情形增强</h1>
+      <p class="text-xs text-slate-400 mt-1">仅显示已人工验证的图片</p>
+      <a href="/" class="text-xs text-accent hover:underline mt-2 inline-block">← 标注验证</a>
+    </div>
+    <div class="flex-1 min-h-0 overflow-y-auto p-2" id="verifiedList">
+      <p class="text-slate-400 text-sm p-2" id="verifiedEmpty">加载中…</p>
+    </div>
+  </aside>
+
+  <!-- 主区域 -->
+  <main class="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+    <div class="flex-1 flex min-h-0 overflow-hidden">
+      <!-- 左半：当前图 + 描述与目标 -->
+      <div class="w-1/2 min-w-0 flex flex-col border-r border-slate-200 bg-white">
+        <div class="p-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+          <span class="text-sm font-medium text-slate-700 truncate" id="currentImageName">请从左侧选择一张已验证图片</span>
+        </div>
+        <div class="flex-1 min-h-0 flex flex-col p-3 gap-3 overflow-auto">
+          <div class="flex-shrink-0 rounded-lg overflow-hidden border border-slate-200 bg-slate-100" style="max-height: 280px;">
+            <img id="previewImage" alt="" class="w-full h-full object-contain max-h-[280px]" />
+          </div>
+          <div class="flex-shrink-0">
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">场景描述</label>
+            <p id="currentScene" class="text-sm text-slate-700 bg-slate-50 rounded-lg p-2 border border-slate-200 min-h-[2.5rem]">—</p>
+          </div>
+          <div class="flex-shrink-0">
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">目标列表</label>
+            <div id="currentObjects" class="text-sm text-slate-700 bg-slate-50 rounded-lg p-2 border border-slate-200 max-h-32 overflow-y-auto">—</div>
+          </div>
+          <div class="flex-shrink-0">
+            <button type="button" id="btnGeneratePrompts" class="w-full py-2.5 rounded-lg bg-accent hover:bg-accentHover text-white font-medium text-sm transition-colors">
+              生成边缘情形提示词（Qwen）
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右半：对话 + 提示词列表 + 生成 -->
+      <div class="w-1/2 min-w-0 flex flex-col bg-slate-50">
+        <div class="p-3 border-b border-slate-200 bg-white">
+          <h2 class="text-sm font-semibold text-slate-700">与 Qwen 讨论提示词</h2>
+          <p class="text-xs text-slate-500 mt-0.5">可对模型回复进行追问或修改要求</p>
+        </div>
+        <div class="flex-1 min-h-0 overflow-y-auto p-3 space-y-2" id="chatArea">
+          <p class="text-slate-400 text-sm">点击「生成边缘情形提示词」后，此处显示对话与建议的提示词。</p>
+        </div>
+        <div class="p-3 border-t border-slate-200 bg-white flex gap-2">
+          <input type="text" id="chatInput" placeholder="输入补充说明或修改要求…" class="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-accent/30 focus:border-accent" />
+          <button type="button" id="btnSendChat" class="px-4 py-2 rounded-lg bg-slate-600 hover:bg-slate-700 text-white text-sm font-medium">发送</button>
+        </div>
+        <div class="p-3 border-t border-slate-200 bg-white">
+          <h3 class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">已生成的提示词（点击「生成图片」将用 qwen-image-edit 生成新图，label 拷贝原图）</h3>
+          <ul id="promptsList" class="space-y-2 max-h-40 overflow-y-auto">
+            <li class="text-slate-400 text-sm">暂无</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const state = {
+      baseUrl: '',
+      images: [],
+      current: null,
+      chatHistory: [],
+      prompts: [],
+    };
+
+    function api(path) {
+      return fetch(state.baseUrl + path).then(r => r.json());
+    }
+    function apiPost(path, body) {
+      return fetch(state.baseUrl + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(r => r.json());
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s ?? '';
+      return div.innerHTML;
+    }
+
+    function renderVerifiedList() {
+      const el = document.getElementById('verifiedList');
+      const empty = document.getElementById('verifiedEmpty');
+      if (!state.images.length) {
+        empty.textContent = '暂无已验证图片，请先在「标注验证」中勾选并保存。';
+        empty.classList.remove('hidden');
+        el.querySelectorAll('button.verified-btn').forEach(b => b.remove());
+        return;
+      }
+      empty.classList.add('hidden');
+      el.innerHTML = '';
+      state.images.forEach(img => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'verified-btn w-full text-left px-3 py-2 rounded-lg mb-1 text-sm truncate transition-colors hover:bg-slate-700 text-slate-300 ' + (state.current && state.current.name === img.name ? 'bg-accent/20 text-accent' : '');
+        btn.textContent = img.name;
+        btn.title = img.scene || img.name;
+        btn.dataset.name = img.name;
+        btn.addEventListener('click', () => selectImage(img));
+        el.appendChild(btn);
+      });
+    }
+
+    function selectImage(img) {
+      state.current = img;
+      state.chatHistory = [];
+      state.prompts = [];
+      renderVerifiedList();
+      document.getElementById('currentImageName').textContent = img.name;
+      document.getElementById('previewImage').src = state.baseUrl + '/api/image/' + encodeURIComponent(img.name);
+      document.getElementById('previewImage').alt = img.name;
+      document.getElementById('currentScene').textContent = img.scene || '—';
+      const objs = (img.objects || []).map(o => `${o.category} (${o.x_min?.toFixed(2)}, ${o.y_min?.toFixed(2)}, ${o.x_max?.toFixed(2)}, ${o.y_max?.toFixed(2)})`).join('\n');
+      document.getElementById('currentObjects').textContent = objs || '—';
+      document.getElementById('chatArea').innerHTML = '<p class="text-slate-400 text-sm">点击「生成边缘情形提示词」开始。</p>';
+      document.getElementById('promptsList').innerHTML = '<li class="text-slate-400 text-sm">暂无</li>';
+      document.getElementById('chatInput').value = '';
+    }
+
+    function appendChat(role, content) {
+      const area = document.getElementById('chatArea');
+      const firstHint = area.querySelector('p.text-slate-400');
+      if (firstHint) firstHint.remove();
+      const div = document.createElement('div');
+      div.className = 'rounded-lg p-2 ' + (role === 'user' ? 'bg-accent/10 ml-4' : 'bg-white border border-slate-200 mr-4');
+      div.innerHTML = '<span class="text-xs font-semibold text-slate-500">' + (role === 'user' ? '我' : 'Qwen') + '</span><pre class="prompt-line text-sm mt-1 whitespace-pre-wrap">' + escapeHtml(content) + '</pre>';
+      area.appendChild(div);
+      area.scrollTop = area.scrollHeight;
+    }
+
+    function parsePromptLines(text) {
+      const lines = (text || '').split(/\n/).map(s => s.trim()).filter(Boolean);
+      const result = [];
+      const skipPatterns = [/^(\d+[\.\、]\s*)?/, /^[-*]\s*/];
+      for (const line of lines) {
+        let t = line.replace(/^\d+[\.\、]\s*/, '').replace(/^[-*]\s*/, '').trim();
+        if (t.length > 5) result.push(t);
+      }
+      return result.length ? result : (text || '').trim() ? [text.trim()] : [];
+    }
+
+    function renderPromptsList() {
+      const ul = document.getElementById('promptsList');
+      if (!state.prompts.length) {
+        ul.innerHTML = '<li class="text-slate-400 text-sm">暂无</li>';
+        return;
+      }
+      ul.innerHTML = state.prompts.map((p, i) => {
+        return '<li class="flex items-start gap-2 border border-slate-200 rounded-lg p-2 bg-white">' +
+          '<span class="prompt-line text-sm flex-1 min-w-0">' + escapeHtml(p) + '</span>' +
+          '<button type="button" class="btnGenerateImage flex-shrink-0 px-2 py-1 rounded bg-accent hover:bg-accentHover text-white text-xs" data-idx="' + i + '">生成图片</button>' +
+          '</li>';
+      }).join('');
+      ul.querySelectorAll('.btnGenerateImage').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.getAttribute('data-idx'), 10);
+          const prompt = state.prompts[idx];
+          if (prompt === undefined || !state.current) return;
+          generateImage(prompt, btn);
+        });
+      });
+    }
+
+    function generateImage(editPrompt, btnEl) {
+      if (!state.current) return;
+      const origText = btnEl.textContent;
+      btnEl.disabled = true;
+      btnEl.textContent = '生成中…';
+      apiPost('/api/augment/generate', { imageName: state.current.name, editPrompt: editPrompt })
+        .then(res => {
+          if (res.ok) {
+            btnEl.textContent = '已生成: ' + res.newName;
+            btnEl.classList.remove('bg-accent', 'hover:bg-accentHover');
+            btnEl.classList.add('bg-green-600');
+          } else {
+            btnEl.textContent = res.error || '失败';
+            btnEl.disabled = false;
+          }
+        })
+        .catch(() => {
+          btnEl.textContent = origText;
+          btnEl.disabled = false;
+        });
+    }
+
+    document.getElementById('btnGeneratePrompts').addEventListener('click', () => {
+      if (!state.current) return;
+      const btn = document.getElementById('btnGeneratePrompts');
+      btn.disabled = true;
+      btn.textContent = '生成中…';
+      apiPost('/api/augment/prompts', {
+        imageName: state.current.name,
+        chatHistory: state.chatHistory,
+        userMessage: '',
+      }).then(res => {
+        btn.disabled = false;
+        btn.textContent = '生成边缘情形提示词（Qwen）';
+        if (res.ok) {
+          state.chatHistory.push({ role: 'user', content: '请根据该图片的标注信息生成多条边缘情形编辑提示词（每行一条）。' });
+          state.chatHistory.push({ role: 'assistant', content: res.text });
+          appendChat('assistant', res.text);
+          const newPrompts = parsePromptLines(res.text);
+          newPrompts.forEach(p => { if (p && !state.prompts.includes(p)) state.prompts.push(p); });
+          renderPromptsList();
+        } else {
+          appendChat('assistant', '错误: ' + (res.error || '未知'));
+        }
+      }).catch(() => {
+        btn.disabled = false;
+        btn.textContent = '生成边缘情形提示词（Qwen）';
+      });
+    });
+
+    document.getElementById('btnSendChat').addEventListener('click', () => {
+      const input = document.getElementById('chatInput');
+      const msg = (input.value || '').trim();
+      if (!msg || !state.current) return;
+      state.chatHistory.push({ role: 'user', content: msg });
+      appendChat('user', msg);
+      input.value = '';
+      const btn = document.getElementById('btnSendChat');
+      btn.disabled = true;
+      apiPost('/api/augment/prompts', {
+        imageName: state.current.name,
+        chatHistory: state.chatHistory.slice(0, -1),
+        userMessage: msg,
+      }).then(res => {
+        btn.disabled = false;
+        if (res.ok) {
+          state.chatHistory.push({ role: 'assistant', content: res.text });
+          appendChat('assistant', res.text);
+          const newPrompts = parsePromptLines(res.text);
+          newPrompts.forEach(p => { if (p && !state.prompts.includes(p)) state.prompts.push(p); });
+          renderPromptsList();
+        } else {
+          state.chatHistory.push({ role: 'assistant', content: '错误: ' + (res.error || '未知') });
+          appendChat('assistant', '错误: ' + (res.error || '未知'));
+        }
+      }).catch(() => { btn.disabled = false; });
+    });
+
+    document.getElementById('chatInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        document.getElementById('btnSendChat').click();
+      }
+    });
+
+    api('/api/augment/verified-images').then(data => {
+      state.images = data.images || [];
+      state.baseUrl = '';
+      renderVerifiedList();
+      if (state.images.length) selectImage(state.images[0]);
+    }).catch(() => {
+      document.getElementById('verifiedEmpty').textContent = '加载失败';
+    });
+  </script>
+</body>
+</html>

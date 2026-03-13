@@ -107,6 +107,11 @@ def import_page():
     return send_from_directory(Path(__file__).parent, "import_index.html")
 
 
+@app.route("/augment")
+def augment_page():
+    return send_from_directory(Path(__file__).parent, "augment_index.html")
+
+
 @app.route("/api/config")
 def api_config():
     out = get_output_dir()
@@ -157,6 +162,148 @@ def api_image(name):
 def api_default_prompt():
     from qwen_labeler import DEFAULT_ANNOTATION_PROMPT
     return jsonify({"prompt": DEFAULT_ANNOTATION_PROMPT})
+
+
+# ---------- 边缘情形增强：仅针对已验证图片 ----------
+@app.route("/api/augment/verified-images")
+def api_augment_verified_images():
+    """返回已通过人工验证的图片列表及简要信息，供边缘情形页使用。"""
+    by_name, _ = get_merged_entries()
+    images_dir = get_images_dir()
+    if not images_dir.is_dir():
+        return jsonify({"images": []})
+    names = sorted(
+        f.name for f in images_dir.iterdir()
+        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+    )
+    verified = []
+    for name in names:
+        entry = by_name.get(name)
+        if not entry or not entry.get("verified"):
+            continue
+        label_text = entry.get("label", "")
+        parsed = parse_label(label_text)
+        verified.append({
+            "name": name,
+            "scene": parsed.get("scene", ""),
+            "objects": parsed.get("objects", []),
+            "categories": parsed.get("categories", ""),
+            "label": label_text,
+        })
+    return jsonify({"images": verified})
+
+
+@app.route("/api/augment/prompts", methods=["POST"])
+def api_augment_prompts():
+    """
+    根据图片与标注生成边缘情形提示词，或与 Qwen 多轮讨论。
+    Body: { "imageName": str, "chatHistory": [{role, content}], "userMessage": str }.
+    若 chatHistory 与 userMessage 存在则为多轮对话；否则为首次生成。
+    """
+    data = request.get_json() or {}
+    name = (data.get("imageName") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "缺少 imageName"}), 400
+    images_dir = get_images_dir()
+    path = images_dir / name
+    if not path.is_file():
+        return jsonify({"ok": False, "error": "图片不存在"}), 404
+    by_name, _ = get_merged_entries()
+    entry = by_name.get(name)
+    if not entry or not entry.get("verified"):
+        return jsonify({"ok": False, "error": "该图片未通过人工验证"}), 400
+    label_text = entry.get("label", "")
+    parsed = parse_label(label_text)
+    scene = parsed.get("scene", "")
+    objects = parsed.get("objects", [])
+    categories = parsed.get("categories", "")
+
+    with open(path, "rb") as f:
+        image_bytes = f.read()
+    suf = path.suffix.lower()
+    mime = "image/png" if suf == ".png" else "image/jpeg"
+
+    try:
+        from edge_augment import generate_edge_prompts, chat_edge_prompts
+        chat_history = data.get("chatHistory") or []
+        user_message = (data.get("userMessage") or "").strip()
+        if chat_history and user_message:
+            text = chat_edge_prompts(
+                image_bytes=image_bytes,
+                scene=scene,
+                objects=objects,
+                categories=categories,
+                user_message=user_message,
+                chat_history=chat_history,
+                mime_type=mime,
+            )
+        else:
+            text = generate_edge_prompts(
+                image_bytes=image_bytes,
+                scene=scene,
+                objects=objects,
+                categories=categories,
+                user_extra=user_message or None,
+                chat_history=chat_history if chat_history else None,
+                mime_type=mime,
+            )
+        return jsonify({"ok": True, "text": text})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/augment/generate", methods=["POST"])
+def api_augment_generate():
+    """
+    用 qwen-image-edit 根据编辑提示词生成新图，保存到 images 并写入 labels（复用原图 label）。
+    Body: { "imageName": str, "editPrompt": str }.
+    """
+    data = request.get_json() or {}
+    name = (data.get("imageName") or "").strip()
+    edit_prompt = (data.get("editPrompt") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "缺少 imageName"}), 400
+    if not edit_prompt:
+        return jsonify({"ok": False, "error": "缺少 editPrompt"}), 400
+    images_dir = get_images_dir()
+    path = images_dir / name
+    if not path.is_file():
+        return jsonify({"ok": False, "error": "图片不存在"}), 404
+    by_name, name_to_path = get_merged_entries()
+    entry = by_name.get(name)
+    if not entry or not entry.get("verified"):
+        return jsonify({"ok": False, "error": "该图片未通过人工验证"}), 400
+    label_text = entry.get("label", "")
+
+    try:
+        from edge_augment import image_edit, download_image_url, suggest_new_filename
+        urls = image_edit(path, edit_prompt, keep_position=True)
+        if not urls:
+            return jsonify({"ok": False, "error": "未返回生成图片"}), 500
+        existing = [f.name for f in images_dir.iterdir() if f.is_file()]
+        new_name = suggest_new_filename(name, existing_names=existing)
+        save_path = images_dir / new_name
+        download_image_url(urls[0], save_path)
+
+        # 写入 labels：与主流程一致，使用最新 labels 文件并追加
+        labels_path = get_latest_labels_path()
+        if not labels_path or not labels_path.is_file():
+            labels_path = get_output_dir() / "labels_manual.json"
+        entries, _ = load_labels(labels_path)
+        # 新条目：复用原 label，视为未验证（可再去验证页勾选）
+        new_entry = {"name": new_name, "label": label_text, "verified": False}
+        if "segmentation" in entry:
+            new_entry["segmentation"] = entry["segmentation"]
+        entries.append(new_entry)
+        save_labels(entries, labels_path)
+        return jsonify({
+            "ok": True,
+            "newName": new_name,
+            "labelFile": labels_path.name,
+            "message": f"已生成并保存为 {new_name}，label 已拷贝自原图",
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 def _parse_video_params():

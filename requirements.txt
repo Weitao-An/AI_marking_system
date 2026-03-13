@@ -3,6 +3,7 @@ opencv-python>=4.8.0
 openai>=1.0.0
 python-dotenv>=1.0.0
 flask>=3.0.0
+requests>=2.28.0
 
 # ========== SAM 3 背景分离（sam_segment.py），可选 ==========
 # 需 Python >= 3.12。SAM 3 本体需本地安装：pip install -e sam3_repo（先 git clone sam3 到 sam3_repo）
