@@ -280,7 +280,8 @@ def api_augment_prompts():
 @app.route("/api/augment/generate", methods=["POST"])
 def api_augment_generate():
     """
-    用 qwen-image-edit 根据编辑提示词生成新图，保存到 images 并写入 labels（复用原图 label）。
+    用 qwen-image-edit 根据编辑提示词生成新图，保存到 images 并写入 labels。
+    会根据编辑提示词用 Qwen 适配场景描述，物体列表等沿用原图。
     Body: { "imageName": str, "editPrompt": str }.
     """
     data = request.get_json() or {}
@@ -301,7 +302,7 @@ def api_augment_generate():
     label_text = entry.get("label", "")
 
     try:
-        from edge_augment import image_edit, download_image_url, suggest_new_filename
+        from edge_augment import image_edit, download_image_url, suggest_new_filename, adapt_label_for_edge
         urls = image_edit(path, edit_prompt, keep_position=True)
         if not urls:
             return jsonify({"ok": False, "error": "未返回生成图片"}), 500
@@ -310,13 +311,16 @@ def api_augment_generate():
         save_path = images_dir / new_name
         download_image_url(urls[0], save_path)
 
+        # 根据编辑提示词适配场景描述，生成边缘情形对应的 label（物体列表等保持不变）
+        adapted_label = adapt_label_for_edge(label_text, edit_prompt)
+
         # 写入 labels：与主流程一致，使用最新 labels 文件并追加
         labels_path = get_latest_labels_path()
         if not labels_path or not labels_path.is_file():
             labels_path = get_output_dir() / "labels_manual.json"
         entries, _ = load_labels(labels_path)
-        # 新条目：复用原 label，视为未验证（可再去验证页勾选）
-        new_entry = {"name": new_name, "label": label_text, "verified": False}
+        # 新条目：使用适配后的 label，视为未验证（可再去验证页勾选）
+        new_entry = {"name": new_name, "label": adapted_label, "verified": False}
         if "segmentation" in entry:
             new_entry["segmentation"] = entry["segmentation"]
         entries.append(new_entry)
@@ -325,10 +329,48 @@ def api_augment_generate():
             "ok": True,
             "newName": new_name,
             "labelFile": labels_path.name,
-            "message": f"已生成并保存为 {new_name}，label 已拷贝自原图",
+            "message": f"已生成并保存为 {new_name}，label 已按边缘情形适配场景描述",
         })
     except Exception as e:
+        import traceback
+        print("ERROR: /api/augment/generate failed")
+        print(traceback.format_exc())
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/augment/delete-edge-image", methods=["POST"])
+def api_augment_delete_edge_image():
+    """
+    删除边缘情形生成的图片文件，并从所有 labels 中移除对应条目。
+    Body: { "imageName": str }。仅允许删除文件名含 _edge 的图片。
+    """
+    data = request.get_json() or {}
+    name = (data.get("imageName") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "缺少 imageName"}), 400
+    if "_edge" not in name:
+        return jsonify({"ok": False, "error": "仅允许删除边缘情形生成的图片（文件名含 _edge）"}), 400
+    images_dir = get_images_dir()
+    path = images_dir / name
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+    out = get_output_dir()
+    for labels_path in get_all_labels_paths():
+        if not labels_path.is_file():
+            continue
+        try:
+            with open(labels_path, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        new_entries = [e for e in entries if e.get("name") != name]
+        if len(new_entries) < len(entries):
+            with open(labels_path, "w", encoding="utf-8") as f:
+                json.dump(new_entries, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "message": f"已删除 {name}"})
 
 
 def _parse_video_params():

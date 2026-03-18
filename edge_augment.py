@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 边缘情形数据增强：基于已验证图片的描述与目标列表，
-用 Qwen VL 生成边缘情形提示词，用 qwen-image-edit 生成新图并复用原 label。
+用 Qwen VL 生成边缘情形提示词，用 qwen-image-edit 生成新图；
+新图 label 会按编辑提示词适配场景描述，物体列表等沿用原图。
 """
 import base64
 import re
@@ -56,8 +57,12 @@ def build_context_from_label(scene: str, objects: list, categories: str) -> str:
 
 
 EDGE_SYSTEM_PROMPT = """你是一个数据增强助手。用户会提供一张图片以及该图片的标注信息（场景描述、物体列表与类别）。
-你的任务是为「图像编辑」生成多条「边缘情形」的编辑提示词，用于在保持图中目标物体位置、大小基本不变的前提下，对画面做合理变化，以扩充训练数据。
-例如：光照变化（阴天/傍晚/逆光）、天气变化（雨雾/雪）、背景细微变化、遮挡与反光、风格微调等。每条提示词应简洁、可被图像编辑模型执行，且不改变目标的位置与尺度。
+你的任务是为「图像编辑」生成多条「边缘情形」的编辑提示词，用于在保持图中目标物体位置、大小不变的前提下，对画面做合理变化，以扩充训练数据。
+例如：光照变化（阴天/傍晚/逆光）、天气变化（雨雾/雪）、背景细微变化、遮挡与反光、风格微调等。每条提示词应简洁、可被图像编辑模型执行。
+硬性约束（必须遵守）：
+1) 不允许改变图片的拍摄角度/视角/镜头焦段，不允许旋转、倾斜、裁剪、缩放画面或改变构图；
+2) 不允许改变目标物体在图片中的位置、比例（大小）、数量；不允许移动/拉伸/缩放任何目标；
+3) 只允许对光照、天气、颜色风格、背景细节与轻微遮挡等做合理变化。
 请直接输出多条编辑提示词，每行一条，不要编号以外的多余解释。"""
 
 
@@ -170,10 +175,56 @@ def chat_edge_prompts(
     raise last_error
 
 
+ADAPT_SCENE_PROMPT = """你是一个标注助手。原图的场景描述如下，对该图做了「图像编辑」生成边缘情形图，编辑内容如下。
+请根据编辑内容，写出一段「适配边缘情形后的场景描述」：在保留原场景主体（如工地、车辆、机械等）的前提下，把光照、天气、时间等变化融入描述。
+只输出新的场景描述文本，不要输出物体列表、编号或其它内容，不要重复编辑词本身。一两句话即可。"""
+
+
+def adapt_label_for_edge(original_label_text: str, edit_prompt: str, model: str = EDGE_PROMPT_MODEL_FLASH) -> str:
+    """
+    根据编辑提示词，将原 label 中的场景描述修改为适配边缘情形的描述，物体列表与类别等保持不变。
+    :param original_label_text: 原图完整 label 文本
+    :param edit_prompt: 本次图像编辑使用的提示词（如「阴天傍晚光照」）
+    :return: 适配后的完整 label 文本；若解析或调用失败则返回原 label
+    """
+    from label_parser import parse_label, format_label
+    parsed = parse_label(original_label_text or "")
+    scene = (parsed.get("scene") or "").strip()
+    if not scene and not (parsed.get("objects") or parsed.get("raw")):
+        return original_label_text or ""
+    if not edit_prompt.strip():
+        return original_label_text or ""
+
+    user_text = f"原场景描述：\n{scene}\n\n对该图做了如下编辑：\n{edit_prompt}\n\n请输出适配边缘情形后的场景描述（只输出描述文本）："
+    try:
+        client = _client()
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": ADAPT_SCENE_PROMPT},
+                {"role": "user", "content": user_text},
+            ],
+        )
+        new_scene = (completion.choices[0].message.content or "").strip()
+        if not new_scene:
+            return original_label_text or ""
+        # 去掉可能带有的引号或编号
+        new_scene = re.sub(r"^[\d.、\s]+", "", new_scene)
+        new_scene = new_scene.strip().strip('"\'')
+        parsed["scene"] = new_scene
+        return format_label(parsed)
+    except Exception:
+        return original_label_text or ""
+
+
 def _ensure_position_instruction(edit_prompt: str) -> str:
     """在编辑指令前加上保持目标位置的说明。"""
-    prefix = "保持图中所有目标物体的位置、大小和数量不变，仅对画面做以下修改："
-    if "位置" in edit_prompt or "不变" in edit_prompt:
+    prefix = (
+        "硬性约束：不允许改变图片的拍摄角度/视角/构图；不允许旋转、倾斜、裁剪或缩放画面。"
+        "保持图中所有目标物体的位置、比例（大小）和数量不变，不移动、不拉伸、不缩放任何目标。"
+        "仅对画面做以下修改："
+    )
+    if ("角度" in edit_prompt or "视角" in edit_prompt or "构图" in edit_prompt) and ("位置" in edit_prompt or "不变" in edit_prompt):
         return edit_prompt
     return f"{prefix}\n{edit_prompt}"
 
@@ -223,7 +274,12 @@ def image_edit(
         "Authorization": f"Bearer {QWEN_API_KEY}",
     }
     resp = requests.post(DASHSCOPE_GENERATION_URL, json=payload, headers=headers, timeout=120)
-    resp.raise_for_status()
+    # DashScope 的错误信息通常在响应体里，raise_for_status 会吞掉细节；这里显式带上 body 便于定位问题
+    if not resp.ok:
+        body = (resp.text or "").strip()
+        if len(body) > 2000:
+            body = body[:2000] + "…"
+        raise RuntimeError(f"DashScope 图像编辑接口失败：HTTP {resp.status_code} {resp.reason}; body={body}")
     data = resp.json()
     if "code" in data and data["code"]:
         raise RuntimeError(data.get("message", str(data)))
