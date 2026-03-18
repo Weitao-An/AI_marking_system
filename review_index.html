@@ -27,7 +27,9 @@
     .bbox { stroke: #0d9488; stroke-width: 2; fill: none; }
     .bbox-label { font-size: 11px; fill: #0d9488; font-weight: 600; }
     .contour-poly { stroke: #0d9488; stroke-width: 2; fill: rgba(13, 148, 136, 0.15); }
+    .contour-poly.contour-poly-hover { stroke: #dc2626; stroke-width: 3; fill: rgba(220, 38, 38, 0.25); }
     .contour-label { font-size: 11px; fill: #0d9488; font-weight: 600; }
+    .contour-label.contour-poly-hover { fill: #dc2626; }
     .mode-btn.active { background: #0d9488; color: white; }
     .mode-btn:not(.active) { background: #f1f5f9; color: #475569; }
     .mode-btn:not(.active):hover { background: #e2e8f0; }
@@ -104,7 +106,7 @@
         人工验证（未勾选时点击即勾选）
       </button>
     </div>
-    <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+    <div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4" id="rightPanelBbox">
       <div>
         <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">场景描述</label>
         <input type="text" id="scene" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-accent/30 focus:border-accent" placeholder="简要描述画面" />
@@ -137,6 +139,11 @@
         <textarea id="suggestion" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-accent/30 focus:border-accent resize-none" placeholder="适合的任务"></textarea>
       </div>
     </div>
+    <div class="flex-1 min-h-0 overflow-y-auto p-4 hidden" id="rightPanelContour">
+      <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">当前轮廓（悬停高亮图中对应轮廓，可删除）</label>
+      <ul id="contourList" class="space-y-1"></ul>
+      <p class="text-xs text-slate-400 mt-2" id="contourEmpty">无轮廓数据</p>
+    </div>
     <div class="p-4 border-t border-slate-200 bg-slate-50">
       <button type="button" id="saveBtn" class="w-full py-2.5 rounded-lg bg-accent hover:bg-accentHover text-white font-medium text-sm transition-colors">保存当前标注</button>
       <p class="text-xs text-slate-500 mt-2 hidden" id="saveHint">已保存</p>
@@ -153,8 +160,9 @@
       pendingEntryName: null,
       sourceFile: null,
       drawMode: false,
-      drawStart: null,  // { x, y, contentRect: { ox, oy, dw, dh } }
-      displayMode: 'bbox',  // 'bbox' | 'contour'：目标框模式 | 轮廓模式
+      drawStart: null,
+      displayMode: 'bbox',
+      hoveredContourIndex: null,  // 轮廓模式下悬停的轮廓索引，图中对应轮廓变红
     };
 
     function api(path) {
@@ -216,6 +224,7 @@
         renderObjectsTable(p.objects || []);
         updateDisplayModeUI();
         drawOverlay();
+        if (state.displayMode === 'contour') renderContourList();
       }).catch(() => {
         if (state.pendingEntryName !== requestedName) return;
         state.entry = { name, label: '', verified: false, parsed: { scene: '', objects: [], categories: '', suggestion: '' }, sourceFile: null, segmentation: [] };
@@ -423,11 +432,13 @@
           svg.innerHTML = '';
           return;
         }
-        svg.innerHTML = seg.map(s => {
+        const hover = state.hoveredContourIndex;
+        svg.innerHTML = seg.map((s, i) => {
           const pts = (s.contour || []);
           if (pts.length < 2) return '';
-          const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0] * dw} ${p[1] * dh}`).join(' ') + ' Z';
-          return `<g><path class="contour-poly" d="${d}"/><text class="contour-label" x="${pts[0][0] * dw}" y="${Math.max(pts[0][1] * dh - 4, 12)}">${escapeHtml(s.category || '')}</text></g>`;
+          const d = pts.map((p, j) => `${j === 0 ? 'M' : 'L'} ${p[0] * dw} ${p[1] * dh}`).join(' ') + ' Z';
+          const hoverCls = (hover === i) ? ' contour-poly-hover' : '';
+          return `<g data-seg-index="${i}"><path class="contour-poly${hoverCls}" d="${d}"/><text class="contour-label${hoverCls}" x="${pts[0][0] * dw}" y="${Math.max(pts[0][1] * dh - 4, 12)}">${escapeHtml(s.category || '')}</text></g>`;
         }).join('');
         return;
       }
@@ -451,6 +462,62 @@
     function updateDisplayModeUI() {
       document.getElementById('modeBbox').classList.toggle('active', state.displayMode === 'bbox');
       document.getElementById('modeContour').classList.toggle('active', state.displayMode === 'contour');
+      document.getElementById('rightPanelBbox').classList.toggle('hidden', state.displayMode === 'contour');
+      document.getElementById('rightPanelContour').classList.toggle('hidden', state.displayMode !== 'contour');
+      if (state.displayMode === 'contour') {
+        state.hoveredContourIndex = null;
+        renderContourList();
+      }
+      drawOverlay();
+    }
+
+    function renderContourList() {
+      const listEl = document.getElementById('contourList');
+      const emptyEl = document.getElementById('contourEmpty');
+      const seg = (state.entry && state.entry.segmentation) ? state.entry.segmentation : [];
+      listEl.innerHTML = '';
+      if (!seg.length) {
+        emptyEl.classList.remove('hidden');
+        return;
+      }
+      emptyEl.classList.add('hidden');
+      seg.forEach((s, i) => {
+        const li = document.createElement('li');
+        li.className = 'flex items-center justify-between gap-2 py-2 px-3 rounded-lg border border-slate-200 hover:bg-slate-50 contour-list-item';
+        li.dataset.segIndex = String(i);
+        li.innerHTML = '<span class="text-sm font-medium text-slate-700 truncate">' + escapeHtml(s.category || '') + '</span><button type="button" class="deleteContour flex-shrink-0 text-red-500 hover:text-red-700 text-xs px-2 py-1 rounded">删除</button>';
+        li.querySelector('.deleteContour').addEventListener('click', (e) => { e.stopPropagation(); deleteContour(i); });
+        li.addEventListener('mouseenter', () => { state.hoveredContourIndex = i; drawOverlay(); });
+        li.addEventListener('mouseleave', () => { state.hoveredContourIndex = null; drawOverlay(); });
+        listEl.appendChild(li);
+      });
+    }
+
+    function deleteContour(index) {
+      if (!state.entry || !state.currentName) return;
+      const seg = state.entry.segmentation || [];
+      if (index < 0 || index >= seg.length) return;
+      const parsed = state.entry.parsed || { scene: '', objects: [], categories: '', suggestion: '' };
+      const objects = (parsed.objects || []).slice();
+      if (index < objects.length) objects.splice(index, 1);
+      seg.splice(index, 1);
+      state.entry.segmentation = seg;
+      parsed.objects = objects;
+      state.entry.parsed = parsed;
+      document.getElementById('scene').value = parsed.scene || '';
+      document.getElementById('categories').value = parsed.categories || '';
+      document.getElementById('suggestion').value = parsed.suggestion || '';
+      renderObjectsTable(objects);
+      renderContourList();
+      drawOverlay();
+      syncCategoriesFromObjects();
+      const payload = { name: state.currentName, parsed: parsed, verified: document.getElementById('verified').checked, labelFile: state.sourceFile || undefined, segmentation: seg };
+      apiPost('/api/save', payload).then(res => {
+        const hint = document.getElementById('saveHint');
+        hint.textContent = res.ok ? '已删除并保存' : (res.error || '保存失败');
+        hint.classList.remove('hidden');
+        setTimeout(() => hint.classList.add('hidden'), 2000);
+      });
     }
 
     document.getElementById('modeBbox').addEventListener('click', () => {

@@ -24,12 +24,14 @@ def run_pipeline(
     prompt: str | None = None,
     only_image_names: list | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    use_batch: bool = False,
 ):
     """
-    完整流程：收集媒体 -> 逐张调用 Qwen 打标 -> 保存结果。
+    完整流程：收集媒体 -> 调用 Qwen 打标（可选批量推理）-> 保存结果。
     若传入 prompt 则作为标注模型的提示词，否则使用默认提示词。
     only_image_names: 若提供则只处理这些图片名（用于跳过已验证的）。
-    progress_callback(current, total, phase): 进度回调，phase 为 'qwen'。
+    progress_callback(current, total, phase): 进度回调，phase 为 'qwen' 或 'qwen_batch'。
+    use_batch: 为 True 且待处理数>=2 时使用百炼批量推理（成本约实时 50%，异步）。
     返回生成的 labels 文件路径。
     """
     if not QWEN_API_KEY and not api_key:
@@ -74,30 +76,46 @@ def run_pipeline(
     images_dir = out_path / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    results = []
     key = api_key or QWEN_API_KEY
+    results: list[dict] = []
 
-    for i, (name, image_bytes) in enumerate(items, 1):
-        # 先保存图片到 images 文件夹，命名与标签中的 name 一致
+    # 先统一保存所有图片
+    for name, image_bytes in items:
         image_file = images_dir / name
         with open(image_file, "wb") as f:
             f.write(image_bytes)
 
-        print(f"  [{i}/{total}] {name} ... ", end="", flush=True)
-        try:
-            label_text = label_image_with_qwen(
-                image_bytes=image_bytes,
-                prompt=_prompt,
-                model=model,
-                api_key=key,
-            )
-            results.append({"name": name, "label": label_text})
-            print("OK")
-        except Exception as e:
-            print(f"失败: {e}")
-            results.append({"name": name, "label": "", "error": str(e)})
-        if progress_callback:
-            progress_callback(i, total, "qwen")
+    use_batch_mode = use_batch and total >= 2
+    if use_batch_mode:
+        print("使用批量推理（百炼 Batch API），成本约为实时推理的 50%")
+        from qwen_batch import label_images_with_batch
+        results = label_images_with_batch(
+            items,
+            prompt=_prompt,
+            model=model,
+            api_key=key,
+            progress_callback=progress_callback,
+        )
+        for i, r in enumerate(results):
+            status = "OK" if r.get("label") and not r.get("error") else ("失败: " + r.get("error", ""))
+            print(f"  [{i + 1}/{total}] {r['name']} ... {status}")
+    else:
+        for i, (name, image_bytes) in enumerate(items, 1):
+            print(f"  [{i}/{total}] {name} ... ", end="", flush=True)
+            try:
+                label_text = label_image_with_qwen(
+                    image_bytes=image_bytes,
+                    prompt=_prompt,
+                    model=model,
+                    api_key=key,
+                )
+                results.append({"name": name, "label": label_text})
+                print("OK")
+            except Exception as e:
+                print(f"失败: {e}")
+                results.append({"name": name, "label": "", "error": str(e)})
+            if progress_callback:
+                progress_callback(i, total, "qwen")
 
     # 保存汇总结果
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -161,6 +179,11 @@ def main():
         default="",
         help="Qwen/DashScope API Key（不填则使用 .env 中的 QWEN_API_KEY）",
     )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="使用百炼批量推理（待处理图片≥2 时生效，成本约实时 50%%，异步）",
+    )
     args = parser.parse_args()
 
     run_pipeline(
@@ -171,6 +194,7 @@ def main():
         max_video_frames=args.max_frames,
         model=args.model,
         api_key=args.api_key,
+        use_batch=args.batch,
     )
 
 

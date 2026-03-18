@@ -77,7 +77,21 @@
     <!-- 3. 一键处理 -->
     <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
       <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">3. 开始处理</h2>
-      <p class="text-sm text-slate-600 mb-4">仅对<strong>未通过人工验证</strong>的图片执行：Qwen 打标 → SAM3 轮廓。已验证的图片会跳过。处理时间取决于待处理数量与接口速度。</p>
+      <p class="text-sm text-slate-600 mb-3">仅对<strong>未通过人工验证</strong>的图片执行：Qwen 打标 → SAM3 轮廓。已验证的图片会跳过。</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4 p-3 bg-slate-50 rounded-lg border border-slate-200">
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="useBatch" checked class="rounded border-slate-300 text-accent focus:ring-accent" />
+          <span class="text-sm text-slate-700">使用批量推理（Qwen，成本约 50%）</span>
+        </label>
+        <label class="block">
+          <span class="block text-xs font-medium text-slate-500 mb-1">SAM3 每批张数</span>
+          <input type="number" id="samBatchSize" min="0" value="20" class="w-full px-2 py-1.5 border border-slate-200 rounded text-sm" title="每 N 张写一个小 labels 文件，0 表示不分批" />
+        </label>
+        <label class="flex items-center gap-2 cursor-pointer sm:col-span-2">
+          <input type="checkbox" id="keepSmallFiles" checked class="rounded border-slate-300 text-accent focus:ring-accent" />
+          <span class="text-sm text-slate-700">保留小 labels 不合并（人工打标加载更快）</span>
+        </label>
+      </div>
       <button type="button" id="processBtn" class="w-full py-3 rounded-lg bg-accent text-white font-medium hover:bg-accentHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
         生成标注并运行 SAM3
       </button>
@@ -164,6 +178,9 @@
       const progressPhase = document.getElementById('progressPhase');
       const progressPct = document.getElementById('progressPct');
       const prompt = document.getElementById('promptInput').value.trim();
+      const useBatch = document.getElementById('useBatch').checked;
+      const samBatchSize = Math.max(0, parseInt(document.getElementById('samBatchSize').value, 10) || 0);
+      const keepSmallFiles = document.getElementById('keepSmallFiles').checked;
       statusEl.classList.remove('text-red-600', 'text-green-600');
       statusEl.textContent = '';
       progressWrap.classList.remove('hidden');
@@ -181,7 +198,12 @@
       fetch(state.baseUrl + '/api/process/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt || undefined }),
+        body: JSON.stringify({
+          prompt: prompt || undefined,
+          use_batch: useBatch,
+          sam_batch_size: samBatchSize,
+          merge_batches: !keepSmallFiles,
+        }),
       })
         .then(async (res) => {
           if (!res.ok) {

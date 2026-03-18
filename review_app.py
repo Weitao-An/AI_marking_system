@@ -32,8 +32,11 @@ def get_images_dir() -> Path:
 
 
 def get_all_labels_paths():
+    """返回所有 labels_*.json；当存在 _batch 小文件时，优先用 batch 内容（先列 batch 再列主文件）。"""
     out = get_output_dir()
-    return sorted(out.glob("labels_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    files = list(out.glob("labels_*.json"))
+    # batch 文件在前，合并时其条目优先生效；主文件在后用于补全未入 batch 的条目（如已验证跳过）
+    return sorted(files, key=lambda f: (("_batch" not in f.name), f.name))
 
 
 def get_latest_labels_path():
@@ -165,6 +168,28 @@ def api_default_prompt():
 
 
 # ---------- 边缘情形增强：仅针对已验证图片 ----------
+@app.route("/api/augment/edge-images", methods=["GET"])
+def api_augment_edge_images():
+    """返回某张原图及其已存在的 edge 变体文件名列表（原图在前，其次 _edge、_edge1、_edge2…）。"""
+    import re
+    name = (request.args.get("name") or "").strip()
+    if not name:
+        return jsonify({"images": []})
+    images_dir = get_images_dir()
+    if not images_dir.is_dir():
+        return jsonify({"images": []})
+    stem = Path(name).stem
+    ext = Path(name).suffix or ".jpg"
+    base = re.sub(r"_edge\d*$", "", stem)
+    ordered = [base + ext]
+    for i in range(0, 500):
+        candidate = f"{base}_edge{i}{ext}" if i > 0 else f"{base}_edge{ext}"
+        if candidate not in ordered:
+            ordered.append(candidate)
+    existing = [n for n in ordered if (images_dir / n).is_file()]
+    return jsonify({"images": existing})
+
+
 @app.route("/api/augment/verified-images")
 def api_augment_verified_images():
     """返回已通过人工验证的图片列表及简要信息，供边缘情形页使用。"""
@@ -420,14 +445,28 @@ def _merge_verified_into_labels_file(labels_path: Path, names: list, by_name: di
         json.dump(full, f, ensure_ascii=False, indent=2)
 
 
+def _process_options(data):
+    """从请求体解析：use_batch、sam_batch_size、merge_batches。"""
+    use_batch = data.get("use_batch", True)
+    sam_batch_size = data.get("sam_batch_size", 0)
+    if sam_batch_size is None:
+        sam_batch_size = 0
+    sam_batch_size = max(0, int(sam_batch_size)) if isinstance(sam_batch_size, (int, float)) else 0
+    merge_batches = data.get("merge_batches", None)
+    if merge_batches is None:
+        merge_batches = sam_batch_size <= 0
+    return use_batch, sam_batch_size, merge_batches
+
+
 @app.route("/api/process", methods=["POST"])
 def api_process():
     """
     一键处理：仅对未通过人工验证的图片跑 Qwen 打标 + SAM3；已验证的跳过。
-    合并已验证条目与新结果后写回，再对整份文件跑 SAM3（SAM3 内部跳过已验证条目）。
+    支持 use_batch（Qwen 批量推理）、sam_batch_size（SAM 每批张数）、merge_batches（是否合并回大文件）。
     """
     data = request.get_json() or {}
     prompt = (data.get("prompt") or "").strip()
+    use_batch, sam_batch_size, merge_batches = _process_options(data)
     images_dir = get_images_dir()
     out_dir = get_output_dir()
     if not images_dir.is_dir():
@@ -450,6 +489,7 @@ def api_process():
             output_dir=str(out_dir),
             prompt=prompt or None,
             only_image_names=unverified,
+            use_batch=use_batch,
         )
         if not labels_path:
             return jsonify({"ok": False, "error": "未生成任何标注"}), 500
@@ -457,11 +497,21 @@ def api_process():
             new_entries = json.load(f)
         _merge_verified_into_labels_file(labels_path, names, by_name, new_entries)
         from sam_segment import process_labels_file
-        process_labels_file(labels_path, images_dir, use_modelscope=True, skip_verified=True)
+        process_labels_file(
+            labels_path,
+            images_dir,
+            use_modelscope=True,
+            skip_verified=True,
+            batch_size=sam_batch_size,
+            merge_batches=merge_batches,
+        )
+        msg = "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看"
+        if sam_batch_size > 0 and not merge_batches:
+            msg = "标注已生成，SAM3 已按批写入小 labels 文件（未合并），可前往「标注验证」查看"
         return jsonify({
             "ok": True,
             "labelFile": labels_path.name,
-            "message": "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看",
+            "message": msg,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -474,6 +524,7 @@ def api_process_stream():
     """
     data = request.get_json() or {}
     prompt = (data.get("prompt") or "").strip()
+    use_batch, sam_batch_size, merge_batches = _process_options(data)
     images_dir = get_images_dir()
     out_dir = get_output_dir()
     if not images_dir.is_dir():
@@ -506,6 +557,7 @@ def api_process_stream():
                 prompt=prompt or None,
                 only_image_names=unverified,
                 progress_callback=on_progress,
+                use_batch=use_batch,
             )
             if not labels_path:
                 q.put({"type": "error", "error": "未生成任何标注"})
@@ -519,8 +571,13 @@ def api_process_stream():
                 use_modelscope=True,
                 skip_verified=True,
                 progress_callback=on_progress,
+                batch_size=sam_batch_size,
+                merge_batches=merge_batches,
             )
-            q.put({"type": "done", "ok": True, "labelFile": labels_path.name, "message": "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看"})
+            msg = "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看"
+            if sam_batch_size > 0 and not merge_batches:
+                msg = "标注已生成，SAM3 已按批写入小 labels 文件（未合并），可前往「标注验证」查看"
+            q.put({"type": "done", "ok": True, "labelFile": labels_path.name, "message": msg})
         except Exception as e:
             q.put({"type": "error", "error": str(e)})
 
@@ -590,10 +647,15 @@ def api_save():
         if e.get("name") == name:
             e["label"] = label_text
             e["verified"] = verified
+            if "segmentation" in data:
+                e["segmentation"] = data["segmentation"]
             found = True
             break
     if not found:
-        entries.append({"name": name, "label": label_text, "verified": verified})
+        new_entry = {"name": name, "label": label_text, "verified": verified}
+        if "segmentation" in data:
+            new_entry["segmentation"] = data["segmentation"]
+        entries.append(new_entry)
     save_labels(entries, path)
     return jsonify({"ok": True, "labelFile": path.name})
 

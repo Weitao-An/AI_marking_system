@@ -35,8 +35,9 @@
       <p class="text-xs text-slate-400 mt-1">仅显示已人工验证的图片</p>
       <a href="/" class="text-xs text-accent hover:underline mt-2 inline-block">← 标注验证</a>
     </div>
-    <div class="flex-1 min-h-0 overflow-y-auto p-2" id="verifiedList">
-      <p class="text-slate-400 text-sm p-2" id="verifiedEmpty">加载中…</p>
+    <div class="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col gap-2">
+      <p class="text-slate-400 text-sm p-2 shrink-0" id="verifiedEmpty">加载中…</p>
+      <div id="verifiedListItems" class="min-h-0 overflow-y-auto"></div>
     </div>
   </aside>
 
@@ -45,12 +46,18 @@
     <div class="flex-1 flex min-h-0 overflow-hidden">
       <!-- 左半：当前图 + 描述与目标 -->
       <div class="w-1/2 min-w-0 flex flex-col border-r border-slate-200 bg-white">
-        <div class="p-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-          <span class="text-sm font-medium text-slate-700 truncate" id="currentImageName">请从左侧选择一张已验证图片</span>
+        <div class="p-3 border-b border-slate-200 bg-slate-50 shrink-0">
+          <span class="text-xs font-semibold text-slate-500 uppercase tracking-wide">当前选择</span>
+          <p id="currentImageName" class="text-sm font-medium text-slate-800 mt-0.5 break-all">请从左侧选择一张已验证图片</p>
         </div>
         <div class="flex-1 min-h-0 flex flex-col p-3 gap-3 overflow-auto">
-          <div class="flex-shrink-0 rounded-lg overflow-hidden border border-slate-200 bg-slate-100" style="max-height: 280px;">
+          <div class="group flex-shrink-0 rounded-lg overflow-hidden border border-slate-200 bg-slate-100 flex items-center justify-center min-h-[200px] relative" style="max-height: 280px;">
             <img id="previewImage" alt="" class="w-full h-full object-contain max-h-[280px]" />
+            <p id="previewPlaceholder" class="text-slate-400 text-sm absolute inset-0 flex items-center justify-center pointer-events-none">选择左侧图片后可在此查看</p>
+            <p id="previewError" class="text-red-500 text-sm absolute inset-0 flex items-center justify-center pointer-events-none hidden">图片加载失败</p>
+            <button type="button" id="btnPrevImage" class="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/50 hover:bg-black/70 text-white text-xl leading-none flex items-center justify-center shadow transition-opacity opacity-0 group-hover:opacity-100 disabled:opacity-30" title="上一张" aria-label="上一张">‹</button>
+            <button type="button" id="btnNextImage" class="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/50 hover:bg-black/70 text-white text-xl leading-none flex items-center justify-center shadow transition-opacity opacity-0 group-hover:opacity-100 disabled:opacity-30" title="下一张" aria-label="下一张">›</button>
+            <div id="imageSwitcherCaption" class="absolute bottom-2 left-1/2 -translate-x-1/2 px-2 py-1 rounded bg-black/50 text-white text-xs hidden">原图 1/1</div>
           </div>
           <div class="flex-shrink-0">
             <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">场景描述</label>
@@ -64,6 +71,12 @@
             <button type="button" id="btnGeneratePrompts" class="w-full py-2.5 rounded-lg bg-accent hover:bg-accentHover text-white font-medium text-sm transition-colors">
               生成边缘情形提示词（Qwen）
             </button>
+          </div>
+          <div class="flex-shrink-0 flex-1 min-h-0 flex flex-col">
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">生成图与提示词对照</label>
+            <div id="generatedList" class="space-y-3 overflow-y-auto min-h-0 flex-1 pr-1">
+              <p class="text-slate-400 text-sm">生成图片后将在此显示：生成图 + 使用的编辑提示词。</p>
+            </div>
           </div>
         </div>
       </div>
@@ -98,6 +111,9 @@
       current: null,
       chatHistory: [],
       prompts: [],
+      generated: [],  // [{ prompt, newName }] 当前原图对应的生成图与提示词
+      viewableImages: [],  // 当前原图 + 已存在的 edge 变体列表（原图在前）
+      viewIndex: 0,        // 当前查看的是第几张，0 = 原图
     };
 
     function api(path) {
@@ -118,42 +134,143 @@
     }
 
     function renderVerifiedList() {
-      const el = document.getElementById('verifiedList');
+      const el = document.getElementById('verifiedListItems');
       const empty = document.getElementById('verifiedEmpty');
+      if (!el || !empty) return;
       if (!state.images.length) {
         empty.textContent = '暂无已验证图片，请先在「标注验证」中勾选并保存。';
         empty.classList.remove('hidden');
-        el.querySelectorAll('button.verified-btn').forEach(b => b.remove());
+        el.innerHTML = '';
         return;
       }
       empty.classList.add('hidden');
       el.innerHTML = '';
       state.images.forEach(img => {
+        const isSelected = state.current && state.current.name === img.name;
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'verified-btn w-full text-left px-3 py-2 rounded-lg mb-1 text-sm truncate transition-colors hover:bg-slate-700 text-slate-300 ' + (state.current && state.current.name === img.name ? 'bg-accent/20 text-accent' : '');
-        btn.textContent = img.name;
-        btn.title = img.scene || img.name;
+        btn.className = 'verified-btn w-full text-left px-2 py-2 rounded-lg mb-1 text-sm transition-colors flex items-center gap-2 ' +
+          (isSelected ? 'bg-accent/25 text-accent border-l-4 border-accent' : 'hover:bg-slate-700 text-slate-300');
+        const thumb = document.createElement('img');
+        thumb.src = state.baseUrl + '/api/image/' + encodeURIComponent(img.name);
+        thumb.alt = '';
+        thumb.className = 'w-10 h-10 object-cover rounded flex-shrink-0';
+        thumb.onerror = function() { this.style.display = 'none'; };
+        const label = document.createElement('span');
+        label.className = 'min-w-0 truncate flex-1';
+        label.textContent = img.name;
+        label.title = (img.scene || img.name).slice(0, 200);
+        btn.appendChild(thumb);
+        btn.appendChild(label);
+        if (isSelected) {
+          const badge = document.createElement('span');
+          badge.className = 'text-xs font-semibold text-accent flex-shrink-0';
+          badge.textContent = '当前';
+          btn.appendChild(badge);
+        }
         btn.dataset.name = img.name;
         btn.addEventListener('click', () => selectImage(img));
         el.appendChild(btn);
       });
     }
 
+    function showViewableImage() {
+      var list = state.viewableImages;
+      var idx = state.viewIndex;
+      var nameEl = document.getElementById('currentImageName');
+      var previewImg = document.getElementById('previewImage');
+      var placeholder = document.getElementById('previewPlaceholder');
+      var previewError = document.getElementById('previewError');
+      var btnPrev = document.getElementById('btnPrevImage');
+      var btnNext = document.getElementById('btnNextImage');
+      var caption = document.getElementById('imageSwitcherCaption');
+      if (!previewImg || !list.length) return;
+      var name = list[idx];
+      if (nameEl) { nameEl.textContent = name; nameEl.title = name; }
+      if (placeholder) placeholder.classList.remove('hidden');
+      if (previewError) previewError.classList.add('hidden');
+      var imgUrl = state.baseUrl + '/api/image/' + encodeURIComponent(name);
+      previewImg.alt = name;
+      previewImg.onload = function() {
+        if (placeholder) placeholder.classList.add('hidden');
+        if (previewError) previewError.classList.add('hidden');
+      };
+      previewImg.onerror = function() {
+        if (placeholder) placeholder.classList.add('hidden');
+        if (previewError) previewError.classList.remove('hidden');
+      };
+      previewImg.src = imgUrl;
+      if (btnPrev) btnPrev.disabled = list.length <= 1;
+      if (btnNext) btnNext.disabled = list.length <= 1;
+      if (caption) {
+        var label = idx === 0 ? '原图' : ('边缘' + idx);
+        caption.textContent = label + ' ' + (idx + 1) + '/' + list.length;
+        caption.classList.remove('hidden');
+      }
+    }
+
     function selectImage(img) {
       state.current = img;
       state.chatHistory = [];
       state.prompts = [];
+      state.generated = [];
       renderVerifiedList();
-      document.getElementById('currentImageName').textContent = img.name;
-      document.getElementById('previewImage').src = state.baseUrl + '/api/image/' + encodeURIComponent(img.name);
-      document.getElementById('previewImage').alt = img.name;
-      document.getElementById('currentScene').textContent = img.scene || '—';
-      const objs = (img.objects || []).map(o => `${o.category} (${o.x_min?.toFixed(2)}, ${o.y_min?.toFixed(2)}, ${o.x_max?.toFixed(2)}, ${o.y_max?.toFixed(2)})`).join('\n');
-      document.getElementById('currentObjects').textContent = objs || '—';
-      document.getElementById('chatArea').innerHTML = '<p class="text-slate-400 text-sm">点击「生成边缘情形提示词」开始。</p>';
-      document.getElementById('promptsList').innerHTML = '<li class="text-slate-400 text-sm">暂无</li>';
-      document.getElementById('chatInput').value = '';
+
+      var nameEl = document.getElementById('currentImageName');
+      var sceneEl = document.getElementById('currentScene');
+      var objsEl = document.getElementById('currentObjects');
+      var chatArea = document.getElementById('chatArea');
+      var promptsList = document.getElementById('promptsList');
+      var chatInput = document.getElementById('chatInput');
+      var caption = document.getElementById('imageSwitcherCaption');
+      if (nameEl) nameEl.textContent = img.name;
+      if (sceneEl) sceneEl.textContent = (img.scene || '—').trim() || '—';
+      if (objsEl) {
+        const objs = (img.objects || []).map(o => `${o.category} (${o.x_min?.toFixed(2)}, ${o.y_min?.toFixed(2)}, ${o.x_max?.toFixed(2)}, ${o.y_max?.toFixed(2)})`).join('\n');
+        objsEl.textContent = objs || '—';
+      }
+      if (chatArea) chatArea.innerHTML = '<p class="text-slate-400 text-sm">点击「生成边缘情形提示词」开始。</p>';
+      if (promptsList) promptsList.innerHTML = '<li class="text-slate-400 text-sm">暂无</li>';
+      if (chatInput) chatInput.value = '';
+      renderGeneratedList();
+
+      state.viewableImages = [img.name];
+      state.viewIndex = 0;
+      if (caption) caption.classList.add('hidden');
+      fetch(state.baseUrl + '/api/augment/edge-images?name=' + encodeURIComponent(img.name))
+        .then(function(r) { return r.ok ? r.json() : Promise.resolve({ images: [] }); })
+        .then(function(data) {
+          var images = (data && data.images) ? data.images : [];
+          if (images.length) {
+            state.viewableImages = images;
+            state.viewIndex = 0;
+          }
+          showViewableImage();
+        })
+        .catch(function() { showViewableImage(); });
+    }
+
+    function renderGeneratedList() {
+      const container = document.getElementById('generatedList');
+      if (!state.generated.length) {
+        container.innerHTML = '<p class="text-slate-400 text-sm">生成图片后将在此显示：生成图 + 使用的编辑提示词。</p>';
+        return;
+      }
+      container.innerHTML = state.generated.map((item, i) => {
+        const imgUrl = state.baseUrl + '/api/image/' + encodeURIComponent(item.newName);
+        return '<div class="rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">' +
+          '<div class="p-2 bg-slate-50 border-b border-slate-200 text-xs font-medium text-slate-600">生成图 ' + (i + 1) + ': ' + escapeHtml(item.newName) + '</div>' +
+          '<div class="p-2 flex gap-2">' +
+            '<div class="flex-shrink-0 w-32 h-32 rounded border border-slate-200 overflow-hidden bg-slate-100">' +
+              '<img src="' + imgUrl + '" alt="' + escapeHtml(item.newName) + '" class="w-full h-full object-contain" />' +
+            '</div>' +
+            '<div class="flex-1 min-w-0">' +
+              '<span class="text-xs font-semibold text-slate-500 block mb-1">使用的编辑提示词：</span>' +
+              '<p class="text-sm text-slate-700 break-words">' + escapeHtml(item.prompt) + '</p>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
     }
 
     function appendChat(role, content) {
@@ -208,6 +325,8 @@
       apiPost('/api/augment/generate', { imageName: state.current.name, editPrompt: editPrompt })
         .then(res => {
           if (res.ok) {
+            state.generated.push({ prompt: editPrompt, newName: res.newName });
+            renderGeneratedList();
             btnEl.textContent = '已生成: ' + res.newName;
             btnEl.classList.remove('bg-accent', 'hover:bg-accentHover');
             btnEl.classList.add('bg-green-600');
@@ -285,13 +404,25 @@
       }
     });
 
+    document.getElementById('btnPrevImage').addEventListener('click', function() {
+      if (state.viewableImages.length <= 1) return;
+      state.viewIndex = (state.viewIndex - 1 + state.viewableImages.length) % state.viewableImages.length;
+      showViewableImage();
+    });
+    document.getElementById('btnNextImage').addEventListener('click', function() {
+      if (state.viewableImages.length <= 1) return;
+      state.viewIndex = (state.viewIndex + 1) % state.viewableImages.length;
+      showViewableImage();
+    });
+
     api('/api/augment/verified-images').then(data => {
       state.images = data.images || [];
       state.baseUrl = '';
       renderVerifiedList();
       if (state.images.length) selectImage(state.images[0]);
     }).catch(() => {
-      document.getElementById('verifiedEmpty').textContent = '加载失败';
+      var emptyEl = document.getElementById('verifiedEmpty');
+      if (emptyEl) emptyEl.textContent = '加载失败';
     });
   </script>
 </body>

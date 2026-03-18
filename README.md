@@ -64,6 +64,25 @@ python main.py "路径/到/图片目录" -o output_labels
 | `--max-frames` | 视频最多提取帧数，0 为不限制 | 0 |
 | `--model` | Qwen 视觉模型名（默认最新 VL） | qwen3-vl-plus |
 | `--api-key` | 覆盖 .env 中的 API Key | 使用 .env |
+| `--batch` | 使用[百炼批量推理](https://help.aliyun.com/zh/model-studio/batch-inference)（待处理≥2 张时生效，成本约实时 50%，异步） | 关闭 |
+
+### 5. 批量任务结果文件格式适配（手动下载的 success.jsonl）
+
+若批量任务完成后未自动下载结果（如服务重启），可从阿里云控制台或结果 URL 下载 `*_success.jsonl`。该文件与项目内解析格式一致，但需将 `custom_id`（0、1、2…）按**提交时的图片顺序**映射回文件名并写入 labels。可用合并命令：
+
+```bash
+# 方式一：提供与批量提交时同序的图片名列表（每行一个文件名）
+python qwen_batch.py output_labels/xxx_success.jsonl -n names.txt -o output_labels/labels_batch_merge.json
+
+# 方式二：从已有 labels 中取前 N 个 name 作为顺序（N = success.jsonl 行数）
+python qwen_batch.py output_labels/xxx_success.jsonl --names-from-labels output_labels/labels_20260313_141933.json -o output_labels/labels_batch_merge.json
+
+# 方式三：从图片目录按文件名排序取前 N 个（仅当批量提交的输入是该目录且顺序为排序时可靠）
+python qwen_batch.py output_labels/xxx_success.jsonl --names-from-dir output_labels/images -o output_labels/labels_batch_merge.json
+```
+
+- `-o` 默认：与 success.jsonl 同目录下的 `labels_batch_merge.json`。  
+- 默认会合并进已有 labels 文件（若存在）；加 `--no-merge` 则只根据图片名列表生成新文件。
 
 ## 输出说明
 
@@ -144,6 +163,9 @@ python sam_segment.py output_labels/labels_20260311_142146.json --images-dir out
 
 # 只处理某一张图
 python sam_segment.py output_labels/labels_20260311_142146.json --image 9e39ce28-9c3b-40f8-9843-d6e868f2e962.png --modelscope
+
+# 多线程加速（每线程独立加载模型，显存占用约 N 倍）
+python sam_segment.py output_labels/labels_20260311_142146.json --images-dir output_labels/images --modelscope --workers 4
 
 # 不使用镜像时，从 Hugging Face 下载（需先申请权重并 login）
 python sam_segment.py output_labels/labels_20260311_142146.json
