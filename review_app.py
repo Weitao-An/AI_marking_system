@@ -30,6 +30,94 @@ def get_output_dir() -> Path:
 def get_images_dir() -> Path:
     return get_output_dir() / "images"
 
+def get_verified_images_dir() -> Path:
+    return get_output_dir() / "images_verified"
+
+
+def get_unverified_images_dir() -> Path:
+    return get_output_dir() / "images_unverified"
+
+
+def _ensure_dirs():
+    get_images_dir().mkdir(parents=True, exist_ok=True)
+    get_verified_images_dir().mkdir(parents=True, exist_ok=True)
+    get_unverified_images_dir().mkdir(parents=True, exist_ok=True)
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """
+    在 Windows 下优先创建硬链接（不占额外空间），失败则复制。
+    dst 若已存在则覆盖。
+    """
+    import shutil
+    if dst.exists():
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+    try:
+        os.link(str(src), str(dst))
+        return
+    except OSError:
+        pass
+    shutil.copyfile(str(src), str(dst))
+
+
+def sync_image_classification(name: str, verified: bool) -> None:
+    """
+    将图片同步到 output_labels/images_verified 或 images_unverified（以硬链接/复制形式），并从另一侧移除。
+    不移动原始图片，保证主流程仍使用 output_labels/images。
+    """
+    if not name:
+        return
+    _ensure_dirs()
+    src = get_images_dir() / name
+    v_dst = get_verified_images_dir() / name
+    u_dst = get_unverified_images_dir() / name
+    # 若原图不存在：清理残留链接
+    if not src.is_file():
+        if v_dst.exists():
+            try:
+                v_dst.unlink()
+            except OSError:
+                pass
+        if u_dst.exists():
+            try:
+                u_dst.unlink()
+            except OSError:
+                pass
+        return
+    if verified:
+        _link_or_copy(src, v_dst)
+        if u_dst.exists():
+            try:
+                u_dst.unlink()
+            except OSError:
+                pass
+    else:
+        _link_or_copy(src, u_dst)
+        if v_dst.exists():
+            try:
+                v_dst.unlink()
+            except OSError:
+                pass
+
+
+def sync_all_classifications():
+    """根据 labels 合并结果，同步所有图片的已验证/未验证目录。"""
+    _ensure_dirs()
+    by_name, _ = get_merged_entries()
+    images_dir = get_images_dir()
+    if not images_dir.is_dir():
+        return
+    for f in images_dir.iterdir():
+        if not f.is_file() or f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+            continue
+        name = f.name
+        entry = by_name.get(name)
+        is_verified = bool(entry and entry.get("verified"))
+        sync_image_classification(name, is_verified)
+
 
 def get_all_labels_paths():
     """返回所有 labels_*.json；当存在 _batch 小文件时，优先用 batch 内容（先列 batch 再列主文件）。"""
@@ -126,10 +214,22 @@ def api_config():
                 names.append(f.name)
     all_paths = get_all_labels_paths()
     label_files = [p.name for p in all_paths if p.is_file()]
+    # 分类：已验证 / 未验证（供前端分组显示）
+    by_name, _ = get_merged_entries()
+    verified_names = []
+    unverified_names = []
+    for n in names:
+        e = by_name.get(n)
+        if e and e.get("verified"):
+            verified_names.append(n)
+        else:
+            unverified_names.append(n)
     return jsonify({
         "outputDir": str(out),
         "labelFiles": label_files,
         "imageNames": names,
+        "imageNamesVerified": verified_names,
+        "imageNamesUnverified": unverified_names,
     })
 
 
@@ -319,12 +419,14 @@ def api_augment_generate():
         if not labels_path or not labels_path.is_file():
             labels_path = get_output_dir() / "labels_manual.json"
         entries, _ = load_labels(labels_path)
-        # 新条目：使用适配后的 label，视为未验证（可再去验证页勾选）
-        new_entry = {"name": new_name, "label": adapted_label, "verified": False}
+        # 新条目：使用适配后的 label，默认视为已验证（按你的需求）
+        new_entry = {"name": new_name, "label": adapted_label, "verified": True}
         if "segmentation" in entry:
             new_entry["segmentation"] = entry["segmentation"]
         entries.append(new_entry)
         save_labels(entries, labels_path)
+        # 同步分类目录
+        sync_image_classification(new_name, True)
         return jsonify({
             "ok": True,
             "newName": new_name,
@@ -699,6 +801,11 @@ def api_save():
             new_entry["segmentation"] = data["segmentation"]
         entries.append(new_entry)
     save_labels(entries, path)
+    # 同步分类目录（已验证/未验证）
+    try:
+        sync_image_classification(name, bool(verified))
+    except Exception:
+        pass
     return jsonify({"ok": True, "labelFile": path.name})
 
 
@@ -713,6 +820,10 @@ def main():
         os.environ["REVIEW_OUTPUT_DIR"] = args.output_dir
     print(f"标注目录: {get_output_dir()}")
     print(f"请在浏览器打开: http://{args.host}:{args.port}")
+    try:
+        sync_all_classifications()
+    except Exception:
+        pass
     app.run(host=args.host, port=args.port, debug=False)
 
 

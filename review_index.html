@@ -180,7 +180,13 @@
     function renderImageList() {
       const el = document.getElementById('imageList');
       el.innerHTML = '';
-      state.imageNames.forEach((name, idx) => {
+      const makeHeader = (text) => {
+        const h = document.createElement('div');
+        h.className = 'px-2 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wide';
+        h.textContent = text;
+        return h;
+      };
+      const makeBtn = (name, idx) => {
         const isCurrent = state.currentName === name;
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -189,8 +195,23 @@
         btn.title = name;
         btn.dataset.idx = String(idx);
         btn.addEventListener('click', () => selectImage(name));
-        el.appendChild(btn);
-      });
+        return btn;
+      };
+
+      // 若后端提供了已验证/未验证分组，则按组渲染；否则降级为原来的单列表
+      if (state.imageNamesVerified && state.imageNamesUnverified) {
+        el.appendChild(makeHeader('已验证'));
+        (state.imageNamesVerified || []).forEach((name, idx) => {
+          el.appendChild(makeBtn(name, idx));
+        });
+        el.appendChild(makeHeader('未验证'));
+        (state.imageNamesUnverified || []).forEach((name, idx) => {
+          el.appendChild(makeBtn(name, idx));
+        });
+        return;
+      }
+
+      state.imageNames.forEach((name, idx) => el.appendChild(makeBtn(name, idx)));
     }
 
     function selectImage(name) {
@@ -589,13 +610,19 @@
 
     api('/api/config').then(cfg => {
       state.imageNames = cfg.imageNames || [];
+      state.imageNamesVerified = cfg.imageNamesVerified || null;
+      state.imageNamesUnverified = cfg.imageNamesUnverified || null;
       state.baseUrl = '';
       const files = cfg.labelFiles || [];
       document.getElementById('labelFileInfo').textContent = files.length
         ? '已合并 ' + files.length + ' 个标签文件'
         : '未找到 labels_*.json';
       renderImageList();
-      if (state.imageNames.length) selectImage(state.imageNames[0]);
+      // 进入页面默认选择：优先已验证第一张，否则未验证第一张，否则总列表第一张
+      const first = (state.imageNamesVerified && state.imageNamesVerified.length)
+        ? state.imageNamesVerified[0]
+        : ((state.imageNamesUnverified && state.imageNamesUnverified.length) ? state.imageNamesUnverified[0] : (state.imageNames[0] || null));
+      if (first) selectImage(first);
     }).catch(() => {
       document.getElementById('labelFileInfo').textContent = '无法加载配置';
     });
