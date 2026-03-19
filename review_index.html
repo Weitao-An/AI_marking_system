@@ -25,7 +25,7 @@
   <style>
     body { font-family: 'DM Sans', sans-serif; }
     .bbox { stroke: #0d9488; stroke-width: 2; fill: none; }
-    .bbox-label { font-size: 11px; fill: #0d9488; font-weight: 600; }
+    .bbox-label { font-size: 11px; fill: #0d9488; font-weight: 600; pointer-events: none; }
     .contour-poly { stroke: #0d9488; stroke-width: 2; fill: rgba(13, 148, 136, 0.15); }
     .contour-poly.contour-poly-hover { stroke: #dc2626; stroke-width: 3; fill: rgba(220, 38, 38, 0.25); }
     .contour-label { font-size: 11px; fill: #0d9488; font-weight: 600; }
@@ -52,6 +52,15 @@
       display: block;
     }
     #drawOverlay.draw-active { pointer-events: auto; cursor: crosshair; }
+    #bboxOverlay.bbox-draggable { pointer-events: auto; }
+    #bboxOverlay .bbox-draggable-g { cursor: move; pointer-events: all; }
+    #bboxOverlay .bbox-body-hit { fill: transparent; pointer-events: all; }
+    #bboxOverlay .bbox-resize-handle { fill: rgba(13,148,136,0.4); stroke: #0d9488; stroke-width: 1; pointer-events: all; }
+    #bboxOverlay .bbox-resize-handle:hover { fill: rgba(13,148,136,0.7); }
+    #bboxOverlay [data-resize-handle="n"], #bboxOverlay [data-resize-handle="s"] { cursor: ns-resize; }
+    #bboxOverlay [data-resize-handle="e"], #bboxOverlay [data-resize-handle="w"] { cursor: ew-resize; }
+    #bboxOverlay [data-resize-handle="nw"], #bboxOverlay [data-resize-handle="se"] { cursor: nwse-resize; }
+    #bboxOverlay [data-resize-handle="ne"], #bboxOverlay [data-resize-handle="sw"] { cursor: nesw-resize; }
   </style>
 </head>
 <body class="bg-slate-100 h-screen w-screen flex overflow-hidden">
@@ -163,6 +172,8 @@
       drawStart: null,
       displayMode: 'bbox',
       hoveredContourIndex: null,  // 轮廓模式下悬停的轮廓索引，图中对应轮廓变红
+      bboxDrag: null,   // 目标框整体移动：{ index, start: {x,y}, startBbox }
+      bboxResize: null, // 目标框边角缩放：{ index, handle: 'n'|'s'|'e'|'w'|'nw'|'ne'|'sw'|'se', start: {x,y}, startBbox }
     };
 
     function api(path) {
@@ -314,12 +325,23 @@
         </tr>`).join('');
       tbody.querySelectorAll('.removeObj').forEach(btn => {
         btn.addEventListener('click', () => {
-          btn.closest('tr').remove();
+          const tr = btn.closest('tr');
+          const tbody = tr.parentElement;
+          const idx = Array.from(tbody.children).indexOf(tr);
+          if (state.entry && state.entry.segmentation && idx >= 0 && idx < state.entry.segmentation.length) {
+            state.entry.segmentation.splice(idx, 1);
+          }
+          if (state.entry && state.entry.parsed && state.entry.parsed.objects && idx >= 0 && idx < state.entry.parsed.objects.length) {
+            state.entry.parsed.objects.splice(idx, 1);
+          }
+          tr.remove();
+          tbody.querySelectorAll('tr').forEach((r, i) => { r.dataset.idx = String(i); });
           syncBboxesFromForm();
         });
       });
       tbody.querySelectorAll('input').forEach(inp => {
         inp.addEventListener('change', syncBboxesFromForm);
+        inp.addEventListener('input', syncBboxesFromForm);
       });
     }
 
@@ -342,7 +364,10 @@
         <td class="py-1 px-1"><input type="number" step="0.01" class="obj-ymax w-14 border border-slate-200 rounded px-1 text-sm" value="${o.y_max}" /></td>
         <td class="py-1"><button type="button" class="removeObj text-red-500 hover:text-red-700 text-xs px-1">删除</button></td>`;
       tr.querySelector('.removeObj').addEventListener('click', () => { tr.remove(); syncBboxesFromForm(); });
-      tr.querySelectorAll('input').forEach(inp => inp.addEventListener('change', syncBboxesFromForm));
+      tr.querySelectorAll('input').forEach(inp => {
+        inp.addEventListener('change', syncBboxesFromForm);
+        inp.addEventListener('input', syncBboxesFromForm);
+      });
       tbody.appendChild(tr);
       syncBboxesFromForm();
     }
@@ -464,19 +489,19 @@
         return;
       }
 
-      // 目标框模式：优先用 segmentation[].bbox，无则用表单解析的 objects
-      let objects = [];
-      if (seg.length) {
-        objects = seg.map(s => {
-          const b = s.bbox;
-          if (Array.isArray(b) && b.length >= 4) return { category: s.category, x_min: b[0], y_min: b[1], x_max: b[2], y_max: b[3] };
-          return null;
-        }).filter(Boolean);
-      }
-      if (!objects.length) objects = getParsedFromForm().objects || [];
-      svg.innerHTML = (objects || []).map(o => {
+      // 目标框模式：始终用右侧物体列表（表单）绘制，保证表格坐标修改能同步到图上；带四角四边手柄用于缩放
+      const objects = getParsedFromForm().objects || [];
+      svg.classList.toggle('bbox-draggable', !state.drawMode);
+      const r = 6; // 手柄半径（SVG 单位）
+      svg.innerHTML = (objects || []).map((o, i) => {
         const x = o.x_min * dw, y = o.y_min * dh, width = (o.x_max - o.x_min) * dw, height = (o.y_max - o.y_min) * dh;
-        return `<g><rect class="bbox" x="${x}" y="${y}" width="${width}" height="${height}"/><text class="bbox-label" x="${x}" y="${Math.max(y - 4, 12)}">${escapeHtml(o.category)}</text></g>`;
+        const cx = x + width / 2, cy = y + height / 2;
+        const handles = [
+          ['nw', x, y], ['n', cx, y], ['ne', x + width, y],
+          ['e', x + width, cy], ['se', x + width, y + height], ['s', cx, y + height],
+          ['sw', x, y + height], ['w', x, cy]
+        ].map(([h, hx, hy]) => `<circle class="bbox-resize-handle" data-resize-handle="${h}" data-obj-idx="${i}" cx="${hx}" cy="${hy}" r="${r}"/>`).join('');
+        return `<g class="bbox-draggable-g" data-obj-idx="${i}"><rect class="bbox" x="${x}" y="${y}" width="${width}" height="${height}"/><rect class="bbox-body-hit" x="${x}" y="${y}" width="${width}" height="${height}"/><text class="bbox-label" x="${x}" y="${Math.max(y - 4, 12)}">${escapeHtml(o.category)}</text>${handles}</g>`;
       }).join('');
     }
 
@@ -559,6 +584,119 @@
     function syncBboxesFromForm() {
       drawOverlay();
     }
+
+    function updateBboxInForm(index, bbox) {
+      const rows = document.querySelectorAll('#objectsBody tr');
+      const row = rows[index];
+      if (!row) return;
+      const clamp = v => Math.max(0, Math.min(1, v));
+      const x_min = clamp(bbox.x_min);
+      const y_min = clamp(bbox.y_min);
+      const x_max = clamp(bbox.x_max);
+      const y_max = clamp(bbox.y_max);
+      row.querySelector('.obj-xmin').value = x_min;
+      row.querySelector('.obj-ymin').value = y_min;
+      row.querySelector('.obj-xmax').value = x_max;
+      row.querySelector('.obj-ymax').value = y_max;
+      syncBboxesFromForm();
+    }
+
+    (function setupBboxDrag() {
+      const svg = document.getElementById('bboxOverlay');
+      const container = document.getElementById('imageContainer');
+      const eps = 0.005;
+
+      function toNorm(clientX, clientY) {
+        const rect = getImageContentRect();
+        if (!rect) return null;
+        const cr = container.getBoundingClientRect();
+        return {
+          x: (clientX - cr.left - rect.ox) / rect.dw,
+          y: (clientY - cr.top - rect.oy) / rect.dh
+        };
+      }
+
+      function onDocMouseMove(e) {
+        const p = toNorm(e.clientX, e.clientY);
+        if (!p) return;
+        if (state.bboxResize) {
+          const r = state.bboxResize;
+          let { x_min, y_min, x_max, y_max } = r.startBbox;
+          const clamp = v => Math.max(0, Math.min(1, v));
+          switch (r.handle) {
+            case 'nw': x_min = Math.min(p.x, x_max - eps); y_min = Math.min(p.y, y_max - eps); break;
+            case 'n':  y_min = Math.min(p.y, y_max - eps); break;
+            case 'ne': x_max = Math.max(p.x, x_min + eps); y_min = Math.min(p.y, y_max - eps); break;
+            case 'e':  x_max = Math.max(p.x, x_min + eps); break;
+            case 'se': x_max = Math.max(p.x, x_min + eps); y_max = Math.max(p.y, y_min + eps); break;
+            case 's':  y_max = Math.max(p.y, y_min + eps); break;
+            case 'sw': x_min = Math.min(p.x, x_max - eps); y_max = Math.max(p.y, y_min + eps); break;
+            case 'w':  x_min = Math.min(p.x, x_max - eps); break;
+          }
+          x_min = clamp(x_min); y_min = clamp(y_min); x_max = clamp(x_max); y_max = clamp(y_max);
+          if (x_min >= x_max) x_max = x_min + eps;
+          if (y_min >= y_max) y_max = y_min + eps;
+          updateBboxInForm(r.index, { x_min, y_min, x_max, y_max });
+          state.bboxResize.startBbox = { x_min, y_min, x_max, y_max };
+          return;
+        }
+        if (state.bboxDrag) {
+          const d = state.bboxDrag;
+          const dx = p.x - d.start.x;
+          const dy = p.y - d.start.y;
+          const clamp = v => Math.max(0, Math.min(1, v));
+          let x_min = clamp(d.startBbox.x_min + dx);
+          let y_min = clamp(d.startBbox.y_min + dy);
+          let x_max = clamp(d.startBbox.x_max + dx);
+          let y_max = clamp(d.startBbox.y_max + dy);
+          if (x_min > x_max) [x_min, x_max] = [x_max, x_min];
+          if (y_min > y_max) [y_min, y_max] = [y_max, y_min];
+          updateBboxInForm(d.index, { x_min, y_min, x_max, y_max });
+          state.bboxDrag.startBbox = { x_min, y_min, x_max, y_max };
+          state.bboxDrag.start = p;
+        }
+      }
+
+      function onDocMouseUp() {
+        state.bboxDrag = null;
+        state.bboxResize = null;
+        document.removeEventListener('mousemove', onDocMouseMove);
+        document.removeEventListener('mouseup', onDocMouseUp);
+      }
+
+      svg.addEventListener('mousedown', function(e) {
+        if (state.drawMode || state.displayMode !== 'bbox' || e.button !== 0) return;
+        const handle = e.target.dataset.resizeHandle;
+        const objIdx = e.target.dataset.objIdx;
+        if (handle != null && objIdx != null) {
+          e.preventDefault();
+          const idx = parseInt(objIdx, 10);
+          const obj = getParsedFromForm().objects[idx];
+          if (!obj) return;
+          const p = toNorm(e.clientX, e.clientY);
+          if (!p) return;
+          state.bboxResize = { index: idx, handle, start: p, startBbox: { x_min: obj.x_min, y_min: obj.y_min, x_max: obj.x_max, y_max: obj.y_max } };
+          document.addEventListener('mousemove', onDocMouseMove);
+          document.addEventListener('mouseup', onDocMouseUp);
+          return;
+        }
+        const g = e.target.closest('g[data-obj-idx]');
+        if (!g || e.target.classList.contains('bbox-resize-handle')) return;
+        e.preventDefault();
+        const idx = parseInt(g.dataset.objIdx, 10);
+        const obj = getParsedFromForm().objects[idx];
+        if (!obj) return;
+        const p = toNorm(e.clientX, e.clientY);
+        if (!p) return;
+        state.bboxDrag = {
+          index: idx,
+          start: p,
+          startBbox: { x_min: obj.x_min, y_min: obj.y_min, x_max: obj.x_max, y_max: obj.y_max }
+        };
+        document.addEventListener('mousemove', onDocMouseMove);
+        document.addEventListener('mouseup', onDocMouseUp);
+      });
+    })();
 
     /** 根据物体列表中的类别，自动更新「类别列表」输入框（去重、逗号分隔） */
     function syncCategoriesFromObjects() {

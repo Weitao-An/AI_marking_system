@@ -120,23 +120,72 @@ def sync_all_classifications():
 
 
 def get_all_labels_paths():
-    """返回所有 labels_*.json；当存在 _batch 小文件时，优先用 batch 内容（先列 batch 再列主文件）。"""
+    """返回所有 labels_*.json（按“时间戳从新到旧”排序；同一时间戳下 batch 在前）。"""
     out = get_output_dir()
     files = list(out.glob("labels_*.json"))
-    # batch 文件在前，合并时其条目优先生效；主文件在后用于补全未入 batch 的条目（如已验证跳过）
-    return sorted(files, key=lambda f: (("_batch" not in f.name), f.name))
+
+    def _labels_sort_key(p: Path):
+        """
+        支持：
+        - labels_YYYYMMDD_HHMMSS.json
+        - labels_YYYYMMDD_HHMMSS_batchNNN.json
+        排序目标：最新时间戳优先；同一时间戳 batch 优先（覆盖主文件）；batch 按序号从大到小。
+        """
+        m = re.match(r"^labels_(\d{8})_(\d{6})(?:_batch(\d+))?\.json$", p.name)
+        if not m:
+            # 非标准命名：退化为 mtime
+            try:
+                return (int(p.stat().st_mtime), 0, 0)
+            except OSError:
+                return (0, 0, 0)
+        date_part, time_part, batch_part = m.group(1), m.group(2), m.group(3)
+        ts = int(date_part + time_part)  # YYYYMMDDHHMMSS
+        is_batch = 1 if batch_part is not None else 0
+        batch_idx = int(batch_part) if batch_part is not None else 0
+        return (ts, is_batch, batch_idx)
+
+    return sorted(files, key=_labels_sort_key, reverse=True)
+
+
+def get_all_batch_labels_paths():
+    """仅返回 labels_*_batch*.json（按时间戳从新到旧、batch 从大到小）。"""
+    return [p for p in get_all_labels_paths() if "_batch" in p.name]
+
+
+def get_latest_batch_labels_path():
+    """返回最新的 batch labels 文件；若不存在则 None。"""
+    files = get_all_batch_labels_paths()
+    return files[0] if files else None
 
 
 def get_latest_labels_path():
+    """返回最新的 labels 文件（可能是 batch）。"""
     files = get_all_labels_paths()
     return files[0] if files else None
 
 
+def get_latest_main_labels_path():
+    """返回最新的主 labels 文件（不含 _batch），用于写入/保存。"""
+    files = get_all_labels_paths()
+    for p in files:
+        if "_batch" not in p.name:
+            return p
+    return files[0] if files else None
+
+
+def get_manual_batch_labels_path() -> Path:
+    """
+    手动补录/仅有 batch 体系时的兜底写入文件。
+    只参考 batch 的模式下，如果找不到任何 batch 文件，就写到这个文件里。
+    """
+    return get_output_dir() / "labels_manual_batch001.json"
+
+
 def get_merged_entries():
-    """合并所有 labels_*.json：同名以最新文件为准。返回 (by_name, name_to_path)。"""
+    """只合并 batch labels：同名以最新 batch 为准。返回 (by_name, name_to_path)。"""
     by_name = {}
     name_to_path = {}
-    for path in get_all_labels_paths():
+    for path in get_all_batch_labels_paths():
         if not path.is_file():
             continue
         try:
@@ -159,7 +208,8 @@ def get_merged_entries():
 def load_labels(path=None) -> tuple[list, Path]:
     """返回 (entries, path)。path 为空时用最新文件（单文件加载，供 save 用）。"""
     if path is None:
-        path = get_latest_labels_path()
+        # 只参考 batch 时：默认加载最新 batch；若不存在则使用手动 batch 文件
+        path = get_latest_batch_labels_path() or get_manual_batch_labels_path()
     if not path or not path.is_file():
         return [], path
     with open(path, "r", encoding="utf-8") as f:
@@ -212,7 +262,7 @@ def api_config():
         for f in sorted(images_dir.iterdir()):
             if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
                 names.append(f.name)
-    all_paths = get_all_labels_paths()
+    all_paths = get_all_batch_labels_paths()
     label_files = [p.name for p in all_paths if p.is_file()]
     # 分类：已验证 / 未验证（供前端分组显示）
     by_name, _ = get_merged_entries()
@@ -414,16 +464,22 @@ def api_augment_generate():
         # 根据编辑提示词适配场景描述，生成边缘情形对应的 label（物体列表等保持不变）
         adapted_label = adapt_label_for_edge(label_text, edit_prompt)
 
-        # 写入 labels：与主流程一致，使用最新 labels 文件并追加
-        labels_path = get_latest_labels_path()
-        if not labels_path or not labels_path.is_file():
-            labels_path = get_output_dir() / "labels_manual.json"
+        # 写入 labels：边缘生成应写回“原图所在的 batch 文件”；若原图不在任何 batch 中，再回退到最新 batch / 手动 batch
+        labels_path = name_to_path.get(name) or get_latest_batch_labels_path() or get_manual_batch_labels_path()
         entries, _ = load_labels(labels_path)
         # 新条目：使用适配后的 label，默认视为已验证（按你的需求）
         new_entry = {"name": new_name, "label": adapted_label, "verified": True}
         if "segmentation" in entry:
             new_entry["segmentation"] = entry["segmentation"]
-        entries.append(new_entry)
+        # upsert：避免重复写入同名条目
+        replaced = False
+        for i, e in enumerate(entries):
+            if e.get("name") == new_name:
+                entries[i] = new_entry
+                replaced = True
+                break
+        if not replaced:
+            entries.append(new_entry)
         save_labels(entries, labels_path)
         # 同步分类目录
         sync_image_classification(new_name, True)
@@ -460,7 +516,7 @@ def api_augment_delete_edge_image():
         except OSError as e:
             return jsonify({"ok": False, "error": str(e)}), 500
     out = get_output_dir()
-    for labels_path in get_all_labels_paths():
+    for labels_path in get_all_batch_labels_paths():
         if not labels_path.is_file():
             continue
         try:
@@ -564,16 +620,67 @@ def _get_image_names():
     images_dir = get_images_dir()
     if not images_dir.is_dir():
         return []
-    return [
-        f.name
-        for f in sorted(images_dir.iterdir())
-        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-    ]
+    allowed = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    items = []
+    for f in images_dir.iterdir():
+        if not f.is_file() or f.suffix.lower() not in allowed:
+            continue
+        try:
+            # Windows 下 st_ctime 通常可近似为“导入/创建时间”
+            t = f.stat().st_ctime
+        except OSError:
+            t = 0
+        items.append((t, f.name))
+    # 导入时间从新到旧；同时间按文件名兜底
+    items.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [name for _, name in items]
 
 
 def _unverified_names(names, by_name):
     """在 names 中且未通过人工验证的图片名。"""
     return [n for n in names if n not in by_name or not by_name[n].get("verified")]
+
+
+def _sam3_pending_names_from_labels(labels_path: Path, skip_verified: bool = True) -> set[str]:
+    """
+    读取 labels JSON，计算需要跑 SAM3 的图片名集合。
+    与 sam_segment.process_labels_file 的筛选逻辑保持一致：按 name 聚合；skip_verified=True 时若该 name 下所有条目都 verified=True 则跳过。
+    """
+    try:
+        with open(labels_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return set()
+    by_name: dict[str, list[dict]] = {}
+    for entry in (data or []):
+        name = (entry.get("name") or "").strip()
+        if not name:
+            continue
+        by_name.setdefault(name, []).append(entry)
+    pending: set[str] = set()
+    for name, entries in by_name.items():
+        if skip_verified and entries and all(e.get("verified") for e in entries):
+            continue
+        pending.add(name)
+    return pending
+
+
+def _names_in_batch_files(stem: str, parent: Path) -> set[str]:
+    """汇总某个 stem 的所有 batch 文件里出现过的图片名。"""
+    names: set[str] = set()
+    for p in sorted(parent.glob(f"{stem}_batch*.json")):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(data, list):
+            continue
+        for e in data:
+            n = (e.get("name") or "").strip()
+            if n:
+                names.add(n)
+    return names
 
 
 def _merge_verified_into_labels_file(labels_path: Path, names: list, by_name: dict, new_entries: list):
@@ -592,13 +699,15 @@ def _merge_verified_into_labels_file(labels_path: Path, names: list, by_name: di
 def _process_options(data):
     """从请求体解析：use_batch、sam_batch_size、merge_batches。"""
     use_batch = data.get("use_batch", True)
-    sam_batch_size = data.get("sam_batch_size", 0)
+    # 默认按批输出小文件（更适合人工验证加载）
+    sam_batch_size = data.get("sam_batch_size", 20)
     if sam_batch_size is None:
-        sam_batch_size = 0
+        sam_batch_size = 20
     sam_batch_size = max(0, int(sam_batch_size)) if isinstance(sam_batch_size, (int, float)) else 0
     merge_batches = data.get("merge_batches", None)
     if merge_batches is None:
-        merge_batches = sam_batch_size <= 0
+        # 默认不合并，保留每批的小 labels 文件
+        merge_batches = False
     return use_batch, sam_batch_size, merge_batches
 
 
@@ -648,10 +757,37 @@ def api_process():
             skip_verified=True,
             batch_size=sam_batch_size,
             merge_batches=merge_batches,
+            image_order=unverified,
         )
         msg = "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看"
         if sam_batch_size > 0 and not merge_batches:
             msg = "标注已生成，SAM3 已按批写入小 labels 文件（未合并），可前往「标注验证」查看"
+            # 仅保留 SAM3 的小文件：删除 Qwen 打标阶段的临时主文件（以及同名 txt）
+            try:
+                stem = labels_path.stem
+                parent = labels_path.parent
+                batch_files = sorted(parent.glob(f"{stem}_batch*.json"))
+                if batch_files:
+                    pending = _sam3_pending_names_from_labels(labels_path, skip_verified=True)
+                    covered = _names_in_batch_files(stem, parent)
+                    # 只有当 batch 覆盖了所有待处理 name，才删除临时文件
+                    if pending and not pending.issubset(covered):
+                        return jsonify({
+                            "ok": True,
+                            "labelFile": labels_path.name,
+                            "message": msg + "（未删除临时文件：batch 未覆盖全部待处理图片）",
+                        })
+                    txt_path = labels_path.with_suffix(".txt")
+                    labels_path.unlink(missing_ok=True)
+                    txt_path.unlink(missing_ok=True)
+                    # 返回一个代表性的小文件名（第一个 batch）
+                    return jsonify({
+                        "ok": True,
+                        "labelFile": batch_files[0].name,
+                        "message": msg + f"（已删除临时文件 {labels_path.name}）",
+                    })
+            except Exception:
+                pass
         return jsonify({
             "ok": True,
             "labelFile": labels_path.name,
@@ -717,10 +853,29 @@ def api_process_stream():
                 progress_callback=on_progress,
                 batch_size=sam_batch_size,
                 merge_batches=merge_batches,
+                image_order=unverified,
             )
             msg = "标注已生成并已用 SAM3 写入轮廓，可前往「标注验证」查看"
             if sam_batch_size > 0 and not merge_batches:
                 msg = "标注已生成，SAM3 已按批写入小 labels 文件（未合并），可前往「标注验证」查看"
+                # 仅保留 SAM3 的小文件：删除 Qwen 打标阶段的临时主文件（以及同名 txt）
+                try:
+                    stem = labels_path.stem
+                    parent = labels_path.parent
+                    batch_files = sorted(parent.glob(f"{stem}_batch*.json"))
+                    if batch_files:
+                        pending = _sam3_pending_names_from_labels(labels_path, skip_verified=True)
+                        covered = _names_in_batch_files(stem, parent)
+                        if pending and not pending.issubset(covered):
+                            q.put({"type": "done", "ok": True, "labelFile": labels_path.name, "message": msg + "（未删除临时文件：batch 未覆盖全部待处理图片）"})
+                            return
+                        txt_path = labels_path.with_suffix(".txt")
+                        labels_path.unlink(missing_ok=True)
+                        txt_path.unlink(missing_ok=True)
+                        q.put({"type": "done", "ok": True, "labelFile": batch_files[0].name, "message": msg + f"（已删除临时文件 {labels_path.name}）"})
+                        return
+                except Exception:
+                    pass
             q.put({"type": "done", "ok": True, "labelFile": labels_path.name, "message": msg})
         except Exception as e:
             q.put({"type": "error", "error": str(e)})
@@ -774,18 +929,19 @@ def api_save():
         label_text = data.get("label", "")
     verified = data.get("verified", False)
 
+    # 只参考 batch：优先写回来源 batch；否则写入最新 batch；再否则写入手动 batch 文件
     label_file = data.get("labelFile")
     path = None
     if label_file:
         candidate = get_output_dir() / label_file
-        if candidate.is_file():
+        if candidate.is_file() and "_batch" in candidate.name:
             path = candidate
     if not path:
         by_name, name_to_path = get_merged_entries()
-        path = name_to_path.get(name.strip()) or get_latest_labels_path()
-    entries, path = load_labels(path)
+        path = name_to_path.get(name.strip())
     if not path:
-        path = get_output_dir() / "labels_manual.json"
+        path = get_latest_batch_labels_path() or get_manual_batch_labels_path()
+    entries, path = load_labels(path)
     found = False
     for e in entries:
         if e.get("name") == name:

@@ -447,6 +447,7 @@ def process_labels_file(
     num_workers: int = 1,
     batch_size: int = 0,
     merge_batches: bool = True,
+    image_order: Optional[List[str]] = None,
 ) -> None:
     """
     读取 labels JSON，对每条条目对应的图片用 SAM 3 生成轮廓，写回同一文件。
@@ -473,11 +474,21 @@ def process_labels_file(
             continue
         by_name.setdefault(name, []).append((i, entry))
 
+    # 待处理顺序：若提供 image_order，则严格按该顺序；否则按 labels 中出现的顺序（dict 插入序）。
     to_process: List[Tuple[str, List[int]]] = []
-    for name, indices_entries in by_name.items():
-        if skip_verified and all((e.get("verified") for _, e in indices_entries)):
-            continue
-        to_process.append((name, [x[0] for x in indices_entries]))
+    if image_order:
+        for name in image_order:
+            indices_entries = by_name.get(name)
+            if not indices_entries:
+                continue
+            if skip_verified and all((e.get("verified") for _, e in indices_entries)):
+                continue
+            to_process.append((name, [x[0] for x in indices_entries]))
+    else:
+        for name, indices_entries in by_name.items():
+            if skip_verified and all((e.get("verified") for _, e in indices_entries)):
+                continue
+            to_process.append((name, [x[0] for x in indices_entries]))
     total = len(to_process)
     if not to_process:
         print("无待处理条目。")
